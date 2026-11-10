@@ -50,6 +50,19 @@ import type {
 import type { SandboxConfig } from '@/persistence';
 import { initializeSandbox, wrapForMcpTransport } from '@/sandbox/manager';
 import packageJson from '../../package.json';
+import type { NativeQuestion, NativeQuestionResponse } from './userQuestions';
+
+export type QuestionRequest = {
+    requestId: number;
+    threadId: string;
+    turnId: string;
+    itemId: string;
+    isBlocking: boolean;
+    questions: NativeQuestion[];
+};
+export class CodexRequestRejected extends Error {
+    constructor(message: string, readonly code: number) { super(message); }
+}
 
 type PendingRequest = {
     resolve: (result: unknown) => void;
@@ -256,6 +269,8 @@ export class CodexAppServerClient {
     // Handlers set by the consumer (runCodex.ts)
     private eventHandler: ((msg: EventMsg) => void) | null = null;
     private approvalHandler: ApprovalHandler | null = null;
+    private questionHandler: ((request: QuestionRequest, signal: AbortSignal) => Promise<NativeQuestionResponse>) | null = null;
+    private pendingQuestionRequests = new Map<string, AbortController>();
 
     constructor(sandboxConfig?: SandboxConfig) {
         this.sandboxConfig = sandboxConfig;
@@ -279,6 +294,10 @@ export class CodexAppServerClient {
 
     setApprovalHandler(handler: ApprovalHandler): void {
         this.approvalHandler = handler;
+    }
+
+    setQuestionHandler(handler: (request: QuestionRequest, signal: AbortSignal) => Promise<NativeQuestionResponse>): void {
+        this.questionHandler = handler;
     }
 
     private extractTurnId(params: any): string | null {
@@ -663,6 +682,7 @@ export class CodexAppServerClient {
                 return;
             }
             this.connected = false;
+            this.eventHandler?.({ type: 'backend_disconnected' });
             // Reject all pending requests
             for (const [id, req] of this.pending) {
                 if (req.epoch !== epoch) continue;
@@ -706,6 +726,7 @@ export class CodexAppServerClient {
 
     private async disconnectInternal(opts?: { preserveThreadState?: boolean }): Promise<void> {
         if (!this.connected && !this.process) return;
+        this.eventHandler?.({ type: 'backend_disconnected' });
 
         const proc = this.process;
         const pid = proc?.pid;
@@ -1147,6 +1168,7 @@ export class CodexAppServerClient {
         sandbox?: SandboxMode;
         effort?: ReasoningEffort;
         extraInputItems?: InputItem[];
+        onAccepted?: () => void;
     }): Promise<{ aborted: boolean }> {
         // Wait for any in-flight interruptTurn() to complete before starting a new
         // turn. Otherwise the stale turn/interrupt RPC can reach Codex after our
@@ -1168,6 +1190,7 @@ export class CodexAppServerClient {
 
         try {
             await this.sendTurn(prompt, opts);
+            opts?.onAccepted?.();
         } catch (err) {
             this.pendingTurnCompletion = null;
             throw err;
@@ -1199,6 +1222,15 @@ export class CodexAppServerClient {
         };
         this.pendingInterrupt = doInterrupt();
         return this.pendingInterrupt;
+    }
+
+    /** Add user input to the active native turn without introducing a supervisor turn. */
+    async steerTurn(text: string): Promise<void> {
+        if (!this._threadId || !this._turnId) throw new CodexRequestRejected('No active Codex turn', -32600);
+        await this.request('turn/steer', {
+            threadId: this._threadId, expectedTurnId: this._turnId,
+            input: [{ type: 'text', text }],
+        });
     }
 
     // ─── State queries ──────────────────────────────────────────
@@ -1291,7 +1323,7 @@ export class CodexAppServerClient {
                 }
                 this.pending.delete(msg.id);
                 if (msg.error) {
-                    pending.reject(new Error(`${pending.method}: ${msg.error.message} (code=${msg.error.code})`));
+                    pending.reject(new CodexRequestRejected(`${pending.method}: ${msg.error.message} (code=${msg.error.code})`, msg.error.code));
                 } else {
                     pending.resolve(msg.result);
                 }
@@ -1393,6 +1425,27 @@ export class CodexAppServerClient {
     }
 
     private async handleServerRequest(id: number, method: string, params: any): Promise<void> {
+        if (method === 'item/tool/requestUserInput') {
+            const epoch = this.processEpoch;
+            const key = JSON.stringify([params.threadId, id]);
+            const controller = new AbortController();
+            this.pendingQuestionRequests.set(key, controller);
+            try {
+                if (!this.questionHandler) throw new Error('No question handler registered');
+                const response = await this.questionHandler({ ...params, requestId: id }, controller.signal);
+                if (!controller.signal.aborted && epoch === this.processEpoch) this.respond(id, response);
+            } catch (error) {
+                logger.warn('[CodexAppServer] User input request could not be answered', { requestId: id });
+                if (!controller.signal.aborted && epoch === this.processEpoch && this.process?.stdin?.writable) {
+                    this.process.stdin.write(JSON.stringify({ jsonrpc: '2.0', id, error: {
+                        code: -32603, message: error instanceof Error ? error.message : 'User input unavailable',
+                    } }) + '\n');
+                }
+            } finally {
+                if (this.pendingQuestionRequests.get(key) === controller) this.pendingQuestionRequests.delete(key);
+            }
+            return;
+        }
         if (method === 'mcpServer/elicitation/request') {
             const threadId = stringOrNull(params?.threadId) ?? this._threadId;
             const turnId = stringOrNull(params?.turnId);
@@ -1509,6 +1562,10 @@ export class CodexAppServerClient {
     }
 
     private handleNotification(method: string, params: any): void {
+        if (method === 'serverRequest/resolved') {
+            this.pendingQuestionRequests.get(JSON.stringify([params.threadId, params.requestId]))?.abort();
+            return;
+        }
         // codex/event notifications: either `codex/event` or `codex/event/<type>`
         if (method === 'codex/event' || method.startsWith('codex/event/')) {
             this.notificationProtocol = 'legacy';
@@ -1541,6 +1598,11 @@ export class CodexAppServerClient {
             return;
         }
 
+        // Questions are v2-only even when this backend also emits legacy events.
+        if (method === 'item/completed' && params?.item?.type === 'agentMessage'
+            && params.item.delivery === 'async' && Array.isArray(params.item.questions) && params.item.questions.length > 0) {
+            this.eventHandler?.({ type: 'user_questions', threadId: params.threadId ?? this._threadId, item: params.item });
+        }
         if (this.handleRawNotification(method, params)) {
             logger.debug(`[CodexAppServer] Raw notification: ${method}`);
             return;

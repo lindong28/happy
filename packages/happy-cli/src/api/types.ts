@@ -2,6 +2,7 @@ import { z } from 'zod'
 import type { Update, UpdateMachineBody } from '@slopus/happy-wire';
 import { UsageSchema } from '@/claude/types'
 import type { SandboxConfig } from '@/persistence'
+import type { QuestionFormState } from '@/codex/questionForms'
 
 export {
   SessionMessageContentSchema,
@@ -398,7 +399,7 @@ export type AgentGoalStatus = {
     }
 );
 
-export type AgentState = {
+export type AgentState = Partial<QuestionFormState> & {
   controlledByUser?: boolean | null | undefined
   /**
    * Ephemeral plan rate-limit windows reported by the agent backend.

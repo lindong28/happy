@@ -1,7 +1,8 @@
 import { render } from "ink";
 import React from "react";
+import { createEnvelope } from '@slopus/happy-wire';
 import { ApiClient } from '@/api/api';
-import { CodexAppServerClient } from './codexAppServerClient';
+import { CodexAppServerClient, CodexRequestRejected } from './codexAppServerClient';
 import type { ReasoningEffort } from './codexAppServerTypes';
 import { CodexPermissionHandler } from './utils/permissionHandler';
 import { ReasoningProcessor } from './utils/reasoningProcessor';
@@ -48,6 +49,8 @@ import {
 } from './codexPrompt';
 import { discoverCodexSkillCommands } from './codexSkills';
 import { CodexRemoteModeState } from './remoteModeState';
+import { QuestionForms, QuestionDeliveryError } from './questionForms';
+import { nativeQuestionForm, nativeQuestionAnswers, asyncQuestionForm, asyncQuestionReply, type AsyncQuestionItem } from './userQuestions';
 import {
     codexGoalActionCapabilities,
     mapCodexGoalEventToAgentGoalStatus,
@@ -260,6 +263,25 @@ export async function runCodex(opts: {
     }
 
     const messageQueue = new MessageQueue2<EnhancedMode>(hashCodexEnhancedMode);
+    const questionForms = new QuestionForms();
+    const queuedQuestionReplies = new Map<string, { threadId: string; formId: string; resolve: () => void; reject: (error: Error) => void }>();
+    questionForms.on('cancel', (formId: string) => {
+        for (const [id, reply] of queuedQuestionReplies) {
+            if (reply.formId !== formId) continue;
+            queuedQuestionReplies.delete(id);
+            reply.reject(new QuestionDeliveryError('Question cancelled before submission'));
+        }
+    });
+    const cancelQuestions = (): void => {
+        questionForms.cancelAll();
+        for (const reply of queuedQuestionReplies.values()) reply.reject(new QuestionDeliveryError('Question cancelled'));
+        queuedQuestionReplies.clear();
+    };
+    questionForms.on('change', () => session.updateAgentState(current => ({ ...current, ...questionForms.snapshot() })));
+    questionForms.on('submissionError', () => session.sendSessionEvent({
+        type: 'message', message: 'Question reply could not be confirmed. Check the running Codex session before sending it again.',
+    }));
+    session.rpcHandlerManager.registerHandler('communication', value => questionForms.reply(value));
 
     session.onFileEvent((fileEvent) => {
         const ev = fileEvent.content.data.ev;
@@ -293,6 +315,7 @@ export async function runCodex(opts: {
     };
 
     const handleUserMessage = createSerialAsyncHandler<UserMessage>(async (message) => {
+        if (isCodexClearText(message.content.text)) cancelQuestions();
         const attachmentsForThisMessage = await session.drainAttachmentsForUserMessage();
 
         const modeResolution = remoteModeState.resolve(message.meta);
@@ -428,6 +451,7 @@ export async function runCodex(opts: {
                 if (permissionHandler) {
                     permissionHandler.abortAll();
                 }
+                cancelQuestions();
 
                 // Request interruption, then force-restart Codex app-server if
                 // it doesn't settle quickly (long-running shell commands).
@@ -529,6 +553,10 @@ export async function runCodex(opts: {
         inkInstance = render(React.createElement(CodexDisplay, {
             messageBuffer,
             logPath: process.env.DEBUG ? logger.getLogPath() : undefined,
+            onSubmit: (text: string) => {
+                session.sendSessionProtocolMessage(createEnvelope('user', { t: 'text', text }));
+                handleUserMessage({ role: 'user', content: { type: 'text', text } });
+            },
             onExit: async () => {
                 // Exit the agent
                 logger.debug('[codex]: Exiting agent via Ctrl-C');
@@ -642,6 +670,21 @@ export async function runCodex(opts: {
     });
 
     // Approval handler: routes server → client approval requests to our permission handler
+    client.setQuestionHandler(async (request, signal) => {
+        const form = nativeQuestionForm(request.questions);
+        const id = `codex-question:${randomUUID()}`;
+        const cancel = (): void => questionForms.cancel(id);
+        const waiting = questionForms.ask(id, form);
+        signal.addEventListener('abort', cancel, { once: true });
+        if (signal.aborted) cancel();
+        try {
+            const answers = await waiting;
+            return answers ? nativeQuestionAnswers(form, answers) : { answers: {} };
+        } finally {
+            signal.removeEventListener('abort', cancel);
+        }
+    });
+
     client.setApprovalHandler(async (params) => {
         const toolName = params.type === 'exec'
             ? 'CodexBash'
@@ -683,6 +726,41 @@ export async function runCodex(opts: {
 
     // Event handler: same EventMsg types as the legacy MCP server — no changes needed
     client.setEventHandler((msg) => {
+        if (msg.type === 'backend_disconnected') {
+            cancelQuestions();
+            return;
+        }
+        if (msg.type === 'user_questions') {
+            const item = msg.item as AsyncQuestionItem;
+            const form = asyncQuestionForm(item);
+            if (form.length > 0) {
+                const threadId = msg.threadId;
+                const formId = `codex-async:${JSON.stringify([threadId, item.id])}`;
+                questionForms.open(formId, form, async answers => {
+                    if (!answers) return;
+                    if (typeof threadId !== 'string' || threadId !== client.threadId) throw new QuestionDeliveryError('Question belongs to another Codex thread');
+                    const text = asyncQuestionReply(form, answers);
+                    if (client.turnId) {
+                        try { await client.steerTurn(text); }
+                        catch (error) {
+                            if (error instanceof CodexRequestRejected && [-32600, -32602].includes(error.code)) throw new QuestionDeliveryError(error.message);
+                            throw error;
+                        }
+                    } else {
+                        await new Promise<void>((resolve, reject) => {
+                            const questionReplyId = randomUUID();
+                            queuedQuestionReplies.set(questionReplyId, { threadId, formId, resolve, reject });
+                            messageQueue.pushIsolated(text, {
+                                permissionMode: remoteModeState.currentPermissionMode,
+                                model: remoteModeState.currentModel, effort: remoteModeState.currentEffort,
+                                questionReplyId,
+                            });
+                        });
+                    }
+                });
+            }
+            return;
+        }
         logger.debug(`[Codex] Event: ${JSON.stringify(msg)}`);
         const isSubagentScopedEvent = hasCodexSubagentReference(msg as Record<string, unknown>);
 
@@ -902,7 +980,16 @@ export async function runCodex(opts: {
                 break;
             }
 
+            const questionReplyId = message.mode.questionReplyId;
+            const questionReply = questionReplyId ? queuedQuestionReplies.get(questionReplyId) : undefined;
+            if (questionReplyId && (!questionReply || questionReply.threadId !== client.threadId)) {
+                questionReply?.reject(new QuestionDeliveryError('Question thread changed before submission'));
+                queuedQuestionReplies.delete(questionReplyId);
+                continue;
+            }
+
             if (isCodexClearText(message.message)) {
+                cancelQuestions();
                 logger.debug('[Codex] Handling /clear command - resetting Codex thread state');
                 client.clearThreadState();
                 currentTurnId = null;
@@ -1004,6 +1091,10 @@ export async function runCodex(opts: {
                     sandbox: executionPolicy.sandbox,
                     effort: message.mode.effort,
                     extraInputItems: imageInputs.inputItems,
+                    onAccepted: () => {
+                        questionReply?.resolve();
+                        if (questionReplyId) queuedQuestionReplies.delete(questionReplyId);
+                    },
                 });
                 first = false;
                 if (includeAppendSystemPrompt) {
@@ -1016,6 +1107,12 @@ export async function runCodex(opts: {
                     logger.debug('[Codex] Turn aborted');
                 }
             } catch (error) {
+                if (questionReply) {
+                    questionReply.reject(error instanceof CodexRequestRejected && [-32600, -32602].includes(error.code)
+                        ? new QuestionDeliveryError(error.message)
+                        : error instanceof Error ? error : new Error('Question delivery failed'));
+                    if (questionReplyId) queuedQuestionReplies.delete(questionReplyId);
+                }
                 // Only actual errors reach here (process crash, connection failure, etc.)
                 logger.warn('Error in codex session:', error);
                 messageBuffer.addMessage('Process exited unexpectedly', 'status');
@@ -1040,6 +1137,7 @@ export async function runCodex(opts: {
 
     } finally {
         // Clean up resources when main loop exits
+        cancelQuestions();
         logger.debug('[codex]: Final cleanup start');
         logActiveHandles('cleanup-start');
 

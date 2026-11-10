@@ -11,6 +11,8 @@ export interface CodexEnhancedMode {
     appendSystemPrompt?: string;
     /** Reasoning effort passed through to Codex's sendTurnAndWait. */
     effort?: ReasoningEffort;
+    /** Internal reply identity; prevents batching an answer with unrelated prompts. */
+    questionReplyId?: string;
 }
 
 export function hashCodexEnhancedMode(mode: CodexEnhancedMode): string {
@@ -19,6 +21,7 @@ export function hashCodexEnhancedMode(mode: CodexEnhancedMode): string {
         model: mode.model,
         appendSystemPrompt: mode.appendSystemPrompt,
         effort: mode.effort,
+        ...(mode.questionReplyId ? { questionReplyId: mode.questionReplyId } : {}),
     });
 }
 
@@ -52,10 +55,12 @@ export function stripHappySystemBlocks(text: string): string {
 
 export function buildCodexTurnPrompt(opts: {
     message: string;
-    mode: Pick<CodexEnhancedMode, 'appendSystemPrompt'>;
+    mode: Pick<CodexEnhancedMode, 'appendSystemPrompt' | 'questionReplyId'>;
     includeAppendSystemPrompt: boolean;
     includeTitleInstruction: boolean;
 }): string {
+    // Native async replies must remain a complete envelope for native clients to recognize them.
+    if (opts.mode.questionReplyId) return opts.message;
     const parts: string[] = [];
 
     if (opts.includeAppendSystemPrompt && opts.mode.appendSystemPrompt) {

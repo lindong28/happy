@@ -50,6 +50,20 @@ happy acp -- custom-agent --flag
 > inside Happy, so selecting "default" for an agy session does **not** give
 > you an approval prompt the way it does for Claude Code.
 
+### Codex 手机接续：开发分支验证状态
+
+本开发分支正在补齐 Codex 原生提问与 Happy 表单之间的转接，并为终端增加文本输入。`Enter` 提交、`Ctrl-U` 清空草稿；手机与终端的普通输入进入同一 Happy 会话队列。这里的终端界面不是完整的 Codex TUI。
+
+同步提问通过 `item/tool/requestUserInput` 回答；异步提问使用 Codex 的 `send_user_message_question_reply` 包装，绑定原线程。明确被拒绝的答复可以重试；送达结果未知时不会自动重发。原生请求撤回、清空上下文和取消时会撤销相应待答控件。秘密输入不使用普通手机表单。
+
+当前只完成本地协议与终端输入验证，尚未完成 App Store 客户端、官方中继和多机验收。现有 Happy 默认模型、推理强度及审批预设会覆盖部分 Codex 设置；本分支尚未解决完整的原配置继承。通用 MCP 表单、自定义 ask-user、进程重启后问题恢复、手机通知及断网恢复仍待验收。请勿将本分支直接替换日常入口。
+
+定向回归（在 `packages/happy-cli` 下执行）：
+
+```bash
+pnpm exec vitest run --project unit src/codex/userQuestions.test.ts src/codex/questionForms.test.ts src/codex/codexQuestions.test.ts src/codex/codexPrompt.test.ts src/codex/codexAppServerClient.test.ts
+```
+
 ## Daemon
 
 The daemon is a background service that stays running on your machine. It lets you spawn and manage coding sessions remotely — from your phone or the web app — without needing an open terminal.

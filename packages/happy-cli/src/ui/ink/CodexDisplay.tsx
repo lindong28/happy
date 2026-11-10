@@ -6,9 +6,11 @@ interface CodexDisplayProps {
     messageBuffer: MessageBuffer
     logPath?: string
     onExit?: () => void
+    onSubmit?: (text: string) => void
 }
 
-export const CodexDisplay: React.FC<CodexDisplayProps> = ({ messageBuffer, logPath, onExit }) => {
+export const CodexDisplay: React.FC<CodexDisplayProps> = ({ messageBuffer, logPath, onExit, onSubmit }) => {
+    const [draft, setDraft] = useState<string>('')
     const [messages, setMessages] = useState<BufferedMessage[]>([])
     const [confirmationMode, setConfirmationMode] = useState<boolean>(false)
     const [actionInProgress, setActionInProgress] = useState<boolean>(false)
@@ -74,7 +76,21 @@ export const CodexDisplay: React.FC<CodexDisplayProps> = ({ messageBuffer, logPa
         if (confirmationMode) {
             resetConfirmation()
         }
-    }, [confirmationMode, actionInProgress, onExit, setConfirmationWithTimeout, resetConfirmation]))
+        if (!onSubmit) return
+        if (key.return) {
+            if (key.shift) setDraft(current => current + '\n')
+            else if (draft.trim()) {
+                onSubmit(draft)
+                setDraft('')
+            }
+        } else if (key.backspace || key.delete) {
+            setDraft(current => Array.from(current).slice(0, -1).join(''))
+        } else if (key.ctrl && input === 'u') {
+            setDraft('')
+        } else if (!key.ctrl && !key.meta && !key.escape && input) {
+            setDraft(current => current + input)
+        }
+    }, [confirmationMode, actionInProgress, onExit, onSubmit, draft, setConfirmationWithTimeout, resetConfirmation]))
 
     const getMessageColor = (type: BufferedMessage['type']): string => {
         switch (type) {
@@ -107,7 +123,7 @@ export const CodexDisplay: React.FC<CodexDisplayProps> = ({ messageBuffer, logPa
             <Box 
                 flexDirection="column" 
                 width={terminalWidth}
-                height={terminalHeight - 4}
+                height={terminalHeight - (onSubmit ? 6 : 4)}
                 borderStyle="round"
                 borderColor="gray"
                 paddingX={1}
@@ -159,9 +175,8 @@ export const CodexDisplay: React.FC<CodexDisplayProps> = ({ messageBuffer, logPa
                         </Text>
                     ) : (
                         <>
-                            <Text color="green" bold>
-                                🤖 Codex Agent Running • Ctrl-C to exit
-                            </Text>
+                            <Text color="green" bold>Codex • Enter to send • Ctrl-U to clear • Ctrl-C to exit</Text>
+                            {onSubmit && <Text>{'> '}{draft || 'Type a prompt…'}<Text inverse> </Text></Text>}
                         </>
                     )}
                     {process.env.DEBUG && logPath && (
