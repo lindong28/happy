@@ -1,5 +1,6 @@
 /** Pending questions use Happy's encrypted agent state and communication RPC. */
 import { EventEmitter } from 'node:events';
+import { createEnvelope, type SessionEnvelope } from '@slopus/happy-wire';
 import { nativeQuestionAnswers, type Question, type QuestionAnswers } from './userQuestions';
 
 type Form = { kind: 'form'; createdAt: number; form: { questions: Question[] } };
@@ -11,6 +12,34 @@ export type QuestionFormState = {
     communications: Record<string, Form>;
     completedCommunications: Record<string, CompletedForm>;
 };
+
+/** Choice forms render inline on iOS only when joined to a chat tool call. */
+export function bindQuestionFormDisplay(
+    forms: QuestionForms,
+    send: (message: SessionEnvelope) => void,
+    getTurnId: () => string | null,
+): void {
+    const activeTurns = new Map<string, string>();
+    forms.on('change', (state: QuestionFormState) => {
+        for (const [id, form] of Object.entries(state.communications)) {
+            if (activeTurns.has(id)) continue;
+            // Async questions may arrive without an active turn. Agent messages
+            // without a turn are discarded by the native iOS normalizer.
+            const turn = getTurnId() ?? `codex-question:${id}`;
+            send(createEnvelope('agent', {
+                t: 'tool-call-start', call: id, name: 'request_user_input',
+                title: 'Question', description: 'Waiting for your answer',
+                args: form.form,
+            }, { turn }));
+            activeTurns.set(id, turn);
+        }
+        for (const [id, turn] of activeTurns) {
+            if (!state.completedCommunications[id]) continue;
+            send(createEnvelope('agent', { t: 'tool-call-end', call: id }, { turn }));
+            activeTurns.delete(id);
+        }
+    });
+}
 
 export class QuestionForms extends EventEmitter {
     private pending = new Map<string, PendingForm>();

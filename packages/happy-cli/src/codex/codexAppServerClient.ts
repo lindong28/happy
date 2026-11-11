@@ -51,6 +51,8 @@ import type { SandboxConfig } from '@/persistence';
 import { initializeSandbox, wrapForMcpTransport } from '@/sandbox/manager';
 import packageJson from '../../package.json';
 import type { NativeQuestion, NativeQuestionResponse } from './userQuestions';
+import type { NativeConfigReadout } from './nativeConfigMetadata';
+import type { McpFormRequest } from './mcpElicitation';
 
 export type QuestionRequest = {
     requestId: number;
@@ -233,6 +235,8 @@ export class CodexAppServerClient {
     private sandboxConfig?: SandboxConfig;
     private sandboxCleanup: (() => Promise<void>) | null = null;
     public sandboxEnabled = false;
+    public resolvedConfiguration: NativeConfigReadout | undefined;
+    private configurationHandler?: (config: NativeConfigReadout | undefined) => void;
 
     // Session state
     private _threadId: string | null = null;
@@ -270,6 +274,7 @@ export class CodexAppServerClient {
     private eventHandler: ((msg: EventMsg) => void) | null = null;
     private approvalHandler: ApprovalHandler | null = null;
     private questionHandler: ((request: QuestionRequest, signal: AbortSignal) => Promise<NativeQuestionResponse>) | null = null;
+    private mcpElicitationHandler: ((request: McpFormRequest, signal: AbortSignal) => Promise<McpServerElicitationRequestResponse>) | null = null;
     private pendingQuestionRequests = new Map<string, AbortController>();
 
     constructor(sandboxConfig?: SandboxConfig) {
@@ -292,8 +297,22 @@ export class CodexAppServerClient {
         this.eventHandler = handler;
     }
 
+    setConfigurationHandler(handler: (config: NativeConfigReadout | undefined) => void): void {
+        this.configurationHandler = handler;
+    }
+
+    private updateResolvedConfiguration(config: NativeConfigReadout | undefined): void {
+        if (this.resolvedConfiguration === config) return;
+        this.resolvedConfiguration = config;
+        this.configurationHandler?.(config);
+    }
+
     setApprovalHandler(handler: ApprovalHandler): void {
         this.approvalHandler = handler;
+    }
+
+    setMcpElicitationHandler(handler: (request: McpFormRequest, signal: AbortSignal) => Promise<McpServerElicitationRequestResponse>): void {
+        this.mcpElicitationHandler = handler;
     }
 
     setQuestionHandler(handler: (request: QuestionRequest, signal: AbortSignal) => Promise<NativeQuestionResponse>): void {
@@ -682,6 +701,7 @@ export class CodexAppServerClient {
                 return;
             }
             this.connected = false;
+            this.updateResolvedConfiguration(undefined);
             this.eventHandler?.({ type: 'backend_disconnected' });
             // Reject all pending requests
             for (const [id, req] of this.pending) {
@@ -725,6 +745,7 @@ export class CodexAppServerClient {
     }
 
     private async disconnectInternal(opts?: { preserveThreadState?: boolean }): Promise<void> {
+        this.updateResolvedConfiguration(undefined);
         if (!this.connected && !this.process) return;
         this.eventHandler?.({ type: 'backend_disconnected' });
 
@@ -831,6 +852,10 @@ export class CodexAppServerClient {
         };
 
         const result = await this.request('thread/start', params) as NewConversationResponse;
+        this.updateResolvedConfiguration({
+            model: result.model, reasoningEffort: result.reasoningEffort,
+            approvalPolicy: result.approvalPolicy, sandbox: result.sandbox,
+        });
         this._threadId = result.thread.id;
         this._turnId = null;
         this.rawSubagentActivitySignaturesByItemId.clear();
@@ -867,6 +892,10 @@ export class CodexAppServerClient {
         };
 
         const result = await this.request('thread/resume', params) as ResumeConversationResponse;
+        this.updateResolvedConfiguration({
+            model: result.model, reasoningEffort: result.reasoningEffort,
+            approvalPolicy: result.approvalPolicy, sandbox: result.sandbox,
+        });
         this._threadId = result.thread.id;
         this._turnId = null;
         this.rawSubagentActivitySignaturesByItemId.clear();
@@ -1240,6 +1269,7 @@ export class CodexAppServerClient {
     }
 
     clearThreadState(): void {
+        this.updateResolvedConfiguration(undefined);
         logger.debug(
             `[CodexAppServer] Clearing thread state: thread=${this._threadId ?? 'none'} turn=${this._turnId ?? 'none'}`,
         );
@@ -1425,14 +1455,26 @@ export class CodexAppServerClient {
     }
 
     private async handleServerRequest(id: number, method: string, params: any): Promise<void> {
-        if (method === 'item/tool/requestUserInput') {
+        const isMcpToolApproval = method === 'mcpServer/elicitation/request'
+            && params?._meta?.codex_approval_kind === 'mcp_tool_call'
+            && params?.mode === 'form'
+            && params?.requestedSchema?.type === 'object'
+            && params?.requestedSchema?.properties
+            && Object.keys(params.requestedSchema.properties).length === 0;
+        if (method === 'item/tool/requestUserInput' || (method === 'mcpServer/elicitation/request' && !isMcpToolApproval)) {
             const epoch = this.processEpoch;
             const key = JSON.stringify([params.threadId, id]);
             const controller = new AbortController();
             this.pendingQuestionRequests.set(key, controller);
             try {
-                if (!this.questionHandler) throw new Error('No question handler registered');
-                const response = await this.questionHandler({ ...params, requestId: id }, controller.signal);
+                let response: NativeQuestionResponse | McpServerElicitationRequestResponse;
+                if (method === 'item/tool/requestUserInput') {
+                    if (!this.questionHandler) throw new Error('No question handler registered');
+                    response = await this.questionHandler({ ...params, requestId: id }, controller.signal);
+                } else {
+                    if (!this.mcpElicitationHandler) throw new Error('No MCP elicitation handler registered');
+                    response = await this.mcpElicitationHandler(params, controller.signal);
+                }
                 if (!controller.signal.aborted && epoch === this.processEpoch) this.respond(id, response);
             } catch (error) {
                 logger.warn('[CodexAppServer] User input request could not be answered', { requestId: id });

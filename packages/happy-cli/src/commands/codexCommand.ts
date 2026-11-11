@@ -1,6 +1,6 @@
 import { authAndSetupMachineIfNeeded } from '@/ui/auth'
 import { runCodex } from '@/codex/runCodex'
-import { extractCodexResumeFlag } from '@/codex/cliArgs'
+import { extractCodexNativeConfigFlag, extractCodexResumeFlag } from '@/codex/cliArgs'
 import { extractNoSandboxFlag } from '@/utils/sandboxFlags'
 import { ensureDaemonRunning } from '@/daemon/ensureDaemonRunning'
 import type { PermissionMode } from '@/api/types'
@@ -11,7 +11,8 @@ export async function handleCodexCommand(args: string[]): Promise<void> {
   let permissionMode: PermissionMode | undefined = undefined
   let model: string | undefined = undefined
   let effort: ReasoningEffort | undefined = undefined
-  const sandboxArgs = extractNoSandboxFlag(args)
+  const nativeArgs = extractCodexNativeConfigFlag(args)
+  const sandboxArgs = extractNoSandboxFlag(nativeArgs.args)
   const codexArgs = extractCodexResumeFlag(sandboxArgs.args)
 
   for (let i = 0; i < codexArgs.args.length; i++) {
@@ -34,6 +35,7 @@ export async function handleCodexCommand(args: string[]): Promise<void> {
   await runCodex({
     credentials,
     startedBy,
+    nativeConfig: nativeArgs.nativeConfig,
     noSandbox: sandboxArgs.noSandbox,
     resumeThreadId: codexArgs.resumeThreadId ?? undefined,
     permissionMode,

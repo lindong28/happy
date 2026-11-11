@@ -82,6 +82,7 @@ public enum UserMessageEncoder {
     }
 
     static func modeMeta(metadata m: JSONValue, composer c: JSONValue, settings: JSONValue?) throws -> [String: JSONValue] {
+        if ComposerModes.usesNativeConfig(m) { return [:] }
         var result: [String: JSONValue] = [:]
         func value(_ value: JSONValue?) -> JSONValue? {
             value == .null ? nil : value

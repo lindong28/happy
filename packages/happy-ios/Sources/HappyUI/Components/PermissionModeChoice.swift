@@ -8,6 +8,8 @@ import UIKit
 @MainActor
 public struct PermissionModeChoice {
     public var menu: AgentInputMenu
+    /// Full local settings, when this is a readout rather than a picker.
+    public var readOnlyDetails: String? = nil
     public var select: (String) -> Void
 
     /// The checked mode's name: the profile row's value.

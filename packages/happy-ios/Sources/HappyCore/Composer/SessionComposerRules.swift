@@ -421,6 +421,7 @@ public struct ComposerChipSet: Equatable, Sendable {
         public var key: String
         public var label: String
         public var isDisabled: Bool
+        public var subtitle: String? = nil
     }
 
     public struct Section: Equatable, Sendable {
@@ -513,7 +514,8 @@ public struct ComposerChipSet: Equatable, Sendable {
                             modeKey: mode.key,
                             sandboxEnabled: sandboxed
                         ),
-                        isDisabled: mode.isDisabled
+                        isDisabled: mode.isDisabled,
+                        subtitle: ComposerModes.usesNativeConfig(metadata) ? mode.description : nil
                     )
                 })],
                 selectedKey: current?.key ?? "default"

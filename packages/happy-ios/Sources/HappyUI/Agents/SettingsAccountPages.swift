@@ -77,6 +77,12 @@ final class AccountSettingsViewController: SettingsPageViewController {
 
     private func pushCards() -> [[SettingsRow]] {
         typealias Row = SettingsRow
+        guard SettingsHooks.supportsRemotePush else {
+            return [[Row(id: "push-unavailable", title: Strings.Push.permission,
+                icon: ("notifications-outline", .red),
+                value: PushPermissionText.label(.init(status: .unsupported, granted: false, canAskAgain: false)),
+                accessory: .none, dimmed: true)]]
+        }
         let permission = [
             Row(id: "push-permission", title: Strings.Push.permission, icon: ("notifications-outline", .red), value: PushPermissionText.label(loadingPush ? nil : pushPermission), accessory: .none),
             Row(id: "push-request", title: Strings.Push.requestAgain, icon: ("shield-checkmark-outline", .green), accessory: .none, action: pushPermission?.status == .unsupported ? nil : { [weak self] in self?.requestPermission() }),
@@ -101,6 +107,7 @@ final class AccountSettingsViewController: SettingsPageViewController {
     }
 
     private func loadPush(showError: Bool = false) {
+        guard SettingsHooks.supportsRemotePush else { return }
         loadingPush = true
         reload()
         let api = session.api

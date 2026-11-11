@@ -129,6 +129,8 @@ public struct SessionInfoModel: Equatable, Sendable {
         if let metadata, metadata != .null {
             let homeDir = string("homeDir")
             let identity = RigIdentity(metadata)
+            let nativeModes = ComposerModes.usesNativeConfig(metadata)
+                ? ComposerModes(metadata: metadata, picks: ComposerPicks(), agentDefaultOverrides: [:]) : nil
             let isRig = session.isRig
             var client: String?
             if isRig {
@@ -144,7 +146,7 @@ public struct SessionInfoModel: Equatable, Sendable {
                 operatingSystem: SessionDetails.truthy(metadata["os"]).map(SessionDetails.osPlatform),
                 client: client,
                 aiProvider: SessionDetails.aiProvider(metadata),
-                model: identity?.modelName,
+                model: nativeModes?.modelMode?.name ?? identity?.modelName,
                 sandbox: isRig ? nil : SessionDetails.sandbox(metadata["sandbox"], homeDir: homeDir),
                 dangerouslySkipPermissions: isRig ? nil : SessionDetails.dangerouslySkipPermissions(
                     metadata["dangerouslySkipPermissions"],

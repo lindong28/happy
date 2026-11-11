@@ -52,7 +52,8 @@ final class SessionComposerView: UIView, ChatComposerView, AgentInputCardDelegat
     /// card's own way (`agentInputCard(_:didSelect:in:)`).
     var permissionChoice: PermissionModeChoice? {
         guard let menu = card.configuration.permission?.menu else { return nil }
-        return PermissionModeChoice(menu: menu) { [weak self] key in
+        let details = ComposerModes.usesNativeConfig(state?.session.record?.metadata) ? modes.permissionMode?.description : nil
+        return PermissionModeChoice(menu: menu, readOnlyDetails: details) { [weak self] key in
             guard let self else { return }
             self.agentInputCard(self.card, didSelect: key, in: .permission)
         }
@@ -565,6 +566,7 @@ final class SessionComposerView: UIView, ChatComposerView, AgentInputCardDelegat
             return
         }
         guard let record = state?.session.record else { return }
+        guard !ComposerModes.usesNativeConfig(record.metadata) else { return }
         let patch: SessionAgentModesPatch
         switch chip {
         case .permission:
@@ -671,7 +673,7 @@ final class SessionComposerView: UIView, ChatComposerView, AgentInputCardDelegat
             chip: chip,
             title: section.title,
             systemImage: section.systemImage,
-            options: section.options.map { .init(key: $0.key, label: $0.label, isDisabled: $0.isDisabled) },
+            options: section.options.map { .init(key: $0.key, label: $0.label, isDisabled: $0.isDisabled, subtitle: $0.subtitle) },
             selectedKey: section.selectedKey
         )
     }
@@ -690,7 +692,7 @@ final class SessionComposerView: UIView, ChatComposerView, AgentInputCardDelegat
                     sections: sections.map { section in
                         AgentInputMenu.Section(
                             title: section.title,
-                            options: section.options.map { .init(key: $0.key, label: $0.label, isDisabled: $0.isDisabled) }
+                            options: section.options.map { .init(key: $0.key, label: $0.label, isDisabled: $0.isDisabled, subtitle: $0.subtitle) }
                         )
                     },
                     selectedKey: chip.selectedKey

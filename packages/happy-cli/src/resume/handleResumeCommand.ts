@@ -59,6 +59,7 @@ export function buildResumeLaunch(session: ResumableHappySession, options: Resum
             throw new Error(`Happy session ${session.id} is missing its Codex thread ID.`);
         }
         const args = ['codex', '--resume', metadata.codexThreadId];
+        if (metadata.codexNativeConfig === true) args.push('--native-config');
         if (options.startedBy) {
             args.push('--started-by', options.startedBy);
         }

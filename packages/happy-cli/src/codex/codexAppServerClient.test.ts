@@ -138,6 +138,53 @@ describe('CodexAppServerClient sandbox integration', () => {
         expect(new CodexAppServerClient().supportsGoalActions()).toBe(false);
     });
 
+    it('retains resolved settings from both thread start and resume', async () => {
+        const { CodexAppServerClient } = await import('./codexAppServerClient');
+        const client = new CodexAppServerClient();
+        const started = { model: 'native-a', reasoningEffort: 'high', approvalPolicy: { granular: { mcp_elicitations: true } }, sandbox: { type: 'dangerFullAccess' } };
+        const resumed = { model: 'native-b', reasoningEffort: null, approvalPolicy: 'on-request', sandbox: { type: 'readOnly' } };
+        const request = vi.spyOn(client as any, 'request')
+            .mockResolvedValueOnce({ thread: { id: 'native-thread' }, ...started })
+            .mockResolvedValueOnce({ thread: { id: 'native-thread' }, ...resumed });
+        expect(client.resolvedConfiguration).toBeUndefined();
+        await client.startThread({});
+        expect(client.resolvedConfiguration).toEqual(started);
+        await client.resumeThread({ threadId: 'native-thread' });
+        expect(client.resolvedConfiguration).toEqual(resumed);
+        for (const [, params] of request.mock.calls) {
+            expect(params).toMatchObject({ model: null, approvalPolicy: null, sandbox: null, config: null });
+        }
+    });
+
+    it('publishes configuration changes and invalidation through reconnect and clear', async () => {
+        const { CodexAppServerClient } = await import('./codexAppServerClient');
+        const { nativeConfigMetadata } = await import('./nativeConfigMetadata');
+        const client = new CodexAppServerClient();
+        let published = nativeConfigMetadata();
+        client.setConfigurationHandler(config => { published = nativeConfigMetadata(config); });
+        const request = vi.spyOn(client as any, 'request');
+        vi.spyOn(client, 'connect').mockResolvedValue(undefined);
+        request.mockResolvedValueOnce({ thread: { id: 'native' }, model: 'native-a', reasoningEffort: 'high', approvalPolicy: 'never', sandbox: { type: 'readOnly' } });
+        await client.startThread({});
+        expect(published.currentModelCode).toBe('native-a');
+        request.mockResolvedValueOnce({ thread: { id: 'native' }, model: 'native-b', reasoningEffort: 'low', approvalPolicy: 'on-request', sandbox: { type: 'workspaceWrite' } });
+        expect(await client.reconnectAndResumeThread()).toBe(true);
+        expect(published.currentModelCode).toBe('native-b');
+        expect(published.currentThoughtLevelCode).toBe('low');
+        client.clearThreadState();
+        expect(client.resolvedConfiguration).toBeUndefined();
+        expect(published.models?.[0].value).toBe('Waiting for Codex');
+        request.mockRejectedValueOnce(new Error('start failed'));
+        await expect(client.startThread({})).rejects.toThrow('start failed');
+        expect(published.models?.[0].value).toBe('Waiting for Codex');
+        request.mockResolvedValueOnce({ thread: { id: 'new' }, model: 'native-c', reasoningEffort: null, approvalPolicy: 'never', sandbox: { type: 'readOnly' } });
+        await client.startThread({});
+        expect(published.currentModelCode).toBe('native-c');
+        request.mockRejectedValueOnce(new Error('resume failed'));
+        expect(await client.reconnectAndResumeThread()).toBe(false);
+        expect(published.models?.[0].value).toBe('Waiting for Codex');
+    });
+
     it('requires Codex 0.153.0 or newer', async () => {
         const { CodexAppServerClient } = await import('./codexAppServerClient');
 

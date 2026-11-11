@@ -39,6 +39,7 @@ export function nativeQuestionForm(questions: NativeQuestion[]): Question[] {
 export function nativeQuestionAnswers(questions: Question[], answers: QuestionAnswers): NativeQuestionResponse {
     return { answers: Object.fromEntries(questions.map(question => {
         const answer = answers?.[question.id];
+        if (answer === undefined && !question.required) return [question.id, { answers: [] }];
         if (!answer || !Array.isArray(answer.options)
             || answer.options.some(option => !question.options.some(known => known.label === option))
             || (!question.multiSelect && answer.options.length > 1)

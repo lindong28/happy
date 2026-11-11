@@ -1,3 +1,14 @@
+/** Opt-in native settings must not be combined with Happy's override flags. */
+export function extractCodexNativeConfigFlag(args: string[]): { nativeConfig: boolean; args: string[] } {
+    const nativeConfig = args.includes('--native-config');
+    if (nativeConfig) {
+        const overrides = ['--model', '--effort', '--permission-mode', '--yolo', '--no-sandbox'];
+        const conflict = args.find(arg => overrides.some(flag => arg === flag || arg.startsWith(`${flag}=`)));
+        if (conflict) throw new Error(`--native-config cannot be combined with ${conflict.split('=')[0]}. Remove the override to use the local Codex configuration.`);
+    }
+    return { nativeConfig, args: args.filter(arg => arg !== '--native-config') };
+}
+
 export function extractCodexResumeFlag(args: string[]): { resumeThreadId: string | null; args: string[] } {
     const remainingArgs: string[] = [];
     let resumeThreadId: string | null = null;

@@ -37,7 +37,7 @@ export class CodexPermissionHandler extends BasePermissionHandler {
         'change_title',
     ];
 
-    constructor(session: ApiSessionClient) {
+    constructor(session: ApiSessionClient, private readonly autoApproveTitles = true) {
         super(session);
     }
 
@@ -77,7 +77,7 @@ export class CodexPermissionHandler extends BasePermissionHandler {
         toolName: string,
         input: unknown
     ): Promise<PermissionResult> {
-        if (this.shouldAutoApprove(toolName, toolCallId)) {
+        if (this.autoApproveTitles && this.shouldAutoApprove(toolName, toolCallId)) {
             logger.debug(`${this.getLogPrefix()} Auto-approving tool ${toolName} (${toolCallId})`);
 
             this.session.updateAgentState((currentState) => ({

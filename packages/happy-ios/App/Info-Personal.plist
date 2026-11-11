@@ -1,0 +1,72 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CADisableMinimumFrameDurationOnPhone</key>
+	<true/>
+	<key>CFBundleDisplayName</key>
+	<string>Happy Personal</string>
+	<key>CFBundleShortVersionString</key>
+	<string>2026.11.1</string>
+	<key>CFBundleVersion</key>
+	<string>1</string>
+	<key>HappyAppVariant</key>
+	<string>development</string>
+	<key>HappyCallAgentID</key>
+	<string>$(HAPPY_CALL_AGENT_V3_ID)</string>
+	<key>HappyPostHogKey</key>
+	<string>$(HAPPY_POSTHOG_API_KEY)</string>
+	<key>HappyRevenueCatAppleKey</key>
+	<string>$(HAPPY_REVENUE_CAT_APPLE_KEY)</string>
+	<key>ITSAppUsesNonExemptEncryption</key>
+	<false/>
+	<key>LSRequiresIPhoneOS</key>
+	<true/>
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<key>NSAllowsArbitraryLoadsInWebContent</key>
+		<true/>
+		<key>NSAllowsArbitraryLoads</key>
+		<true/>
+		<key>NSAllowsLocalNetworking</key>
+		<true/>
+	</dict>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Allow Happy to use your microphone to talk with your coding agents and to dictate messages.</string>
+	<key>NSSpeechRecognitionUsageDescription</key>
+	<string>Allow Happy to turn what you say into text on this iPhone, so you can dictate messages to your agents.</string>
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>Allow Happy to show your photos and videos so you can share them in chats.</string>
+	<key>PHPhotoLibraryPreventAutomaticLimitedAccessAlert</key>
+	<true/>
+	<key>NSPhotoLibraryAddUsageDescription</key>
+	<string>Allow Happy to save pictures and videos your agents made to your library.</string>
+	<key>NSCameraUsageDescription</key>
+	<string>Allow Happy Personal to access your camera to scan QR codes and share photos with AI.</string>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>Allow Happy Personal to find and connect to local devices on your network.</string>
+	<key>UIApplicationSceneManifest</key>
+	<dict>
+		<key>UIApplicationSupportsMultipleScenes</key>
+		<false/>
+	</dict>
+	<key>UILaunchScreen</key>
+	<dict>
+		<key>UIColorName</key>
+		<string>LaunchBackground</string>
+	</dict>
+	<key>UISupportedInterfaceOrientations</key>
+	<array>
+		<string>UIInterfaceOrientationPortrait</string>
+		<string>UIInterfaceOrientationLandscapeLeft</string>
+		<string>UIInterfaceOrientationLandscapeRight</string>
+	</array>
+	<key>UISupportedInterfaceOrientations~ipad</key>
+	<array>
+		<string>UIInterfaceOrientationPortrait</string>
+		<string>UIInterfaceOrientationPortraitUpsideDown</string>
+		<string>UIInterfaceOrientationLandscapeLeft</string>
+		<string>UIInterfaceOrientationLandscapeRight</string>
+	</array>
+</dict>
+</plist>

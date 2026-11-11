@@ -71,9 +71,14 @@ final class BrowserPage {
         // Content blockers match without `|`: each spelling, then each after a user.
         let hosts = [#"127\.[0-9]+\.[0-9]+\.[0-9]+[:/]"#, #"localhost\.?[:/]"#, #"[^/:]*\.localhost\.?[:/]"#, #"0\.0\.0\.0[:/]"#, #"\[::1?\]"#,
                      #"\[::ffff:127\."#, #"\[::ffff:7f"#, #"\[::ffff:0:0\]"#]
-        let rules = hosts.flatMap { [#"^[a-z]+://"# + $0, #"^[a-z]+://[^/]*@"# + $0] }.map { filter in
-            #"{"trigger":{"url-filter":""# + filter.replacingOccurrences(of: "\\", with: "\\\\") + #""},"action":{"type":"block"}}"#
-        }.joined(separator: ",")
+        let filters: [String] = hosts.flatMap { host in
+            [#"^[a-z]+://"# + host, #"^[a-z]+://[^/]*@"# + host]
+        }
+        let encodedRules: [String] = filters.map { filter in
+            let escaped = filter.replacingOccurrences(of: "\\", with: "\\\\")
+            return #"{"trigger":{"url-filter":""# + escaped + #""},"action":{"type":"block"}}"#
+        }
+        let rules = encodedRules.joined(separator: ",")
         guard let list = try await WKContentRuleListStore.default().compileContentRuleList(forIdentifier: "happy-phone-loopback", encodedContentRuleList: "[\(rules)]") else { throw BrowserError.unavailable }
         compiledPhoneRules = list
         return list

@@ -15,6 +15,14 @@ import UserNotifications
 final class PushNotifications: NSObject {
     static let shared = PushNotifications()
 
+    private var supportsRemotePush: Bool {
+        #if HAPPY_PERSONAL
+        false
+        #else
+        true
+        #endif
+    }
+
     /// Fed by AppDelegate's registration callbacks.
     let apns = APNsTokenSource {
         await MainActor.run { UIApplication.shared.registerForRemoteNotifications() }
@@ -51,11 +59,14 @@ final class PushNotifications: NSObject {
     /// From `application(_:didFinishLaunchingWithOptions:)`: UIKit delivers
     /// the launching tap only to a delegate set before launch finishes.
     func install() {
+        SettingsHooks.supportsRemotePush = supportsRemotePush
+        guard supportsRemotePush else { return }
         UNUserNotificationCenter.current().delegate = self
     }
 
     /// From the scene, once its coordinator has started.
     func attach(context: AppContext, coordinator: AppCoordinator) {
+        guard supportsRemotePush else { return }
         self.context = context
         self.coordinator = coordinator
         accountsObservation = context.account.observeAccounts { [weak self] _ in
@@ -69,6 +80,7 @@ final class PushNotifications: NSObject {
 
     /// sync.ts: every app-became-active invalidates `pushTokenSync`.
     func appBecameActive() {
+        guard supportsRemotePush else { return }
         let sync = self.sync
         Task { await sync.invalidate() }
     }

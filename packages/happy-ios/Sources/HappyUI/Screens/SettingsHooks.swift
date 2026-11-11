@@ -7,6 +7,8 @@ import UIKit
 /// choice and the page works, it just has nothing to call.
 @MainActor
 public enum SettingsHooks {
+    /// The application build can opt out when its signing team has no APNs capability.
+    public static var supportsRemotePush = true
     /// The active account's push registration, for Settings › Account's
     /// push rows. HappyApp's `PushNotifications` replaces it on every
     /// account change; nil while signed out.

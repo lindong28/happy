@@ -4,7 +4,7 @@ type ResumeThreadClient = {
     resumeThread: (opts: {
         threadId: string;
         cwd: string;
-        mcpServers: Record<string, unknown>;
+        mcpServers?: Record<string, unknown>;
     }) => Promise<{ threadId: string; model: string }>;
 };
 
@@ -23,7 +23,7 @@ export async function resumeExistingThread(opts: {
     messageBuffer: ResumeThreadMessageBuffer;
     threadId: string;
     cwd: string;
-    mcpServers: Record<string, unknown>;
+    mcpServers?: Record<string, unknown>;
     /**
      * Whether to surface a "Resumed Codex thread …" message in the chat UI.
      * Side chats open empty on purpose, so they pass `false` to keep this

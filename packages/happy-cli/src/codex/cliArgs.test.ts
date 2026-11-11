@@ -1,6 +1,26 @@
 import { describe, expect, it } from 'vitest';
 
-import { extractCodexResumeFlag } from './cliArgs';
+import { extractCodexNativeConfigFlag, extractCodexResumeFlag } from './cliArgs';
+
+describe('extractCodexNativeConfigFlag', () => {
+    it('keeps the existing default and explicit overrides when native mode is absent', () => {
+        expect(extractCodexNativeConfigFlag(['--model', 'test-model', '--yolo'])).toEqual({
+            nativeConfig: false, args: ['--model', 'test-model', '--yolo'],
+        });
+    });
+
+    it('preserves resume and daemon arguments in native mode', () => {
+        const result = extractCodexNativeConfigFlag(['--native-config', '--resume=thread-123', '--started-by', 'daemon']);
+        expect(result.nativeConfig).toBe(true);
+        expect(extractCodexResumeFlag(result.args)).toEqual({ resumeThreadId: 'thread-123', args: ['--started-by', 'daemon'] });
+    });
+
+    it.each(['--model', '--model=test-model', '--effort', '--effort=high', '--permission-mode', '--permission-mode=yolo', '--yolo', '--no-sandbox'])(
+        'rejects the conflicting override %s before authentication', flag => {
+            expect(() => extractCodexNativeConfigFlag(['--native-config', flag])).toThrow('cannot be combined');
+        },
+    );
+});
 
 describe('extractCodexResumeFlag', () => {
     it('returns null and preserves args when resume flag is absent', () => {

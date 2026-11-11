@@ -324,10 +324,22 @@ final class SessionInfoViewController: UIViewController, UIScrollViewDelegate {
         if let loadStatus { shown.append(loadStatus) }
         if let frame, frame.model != nil {
             if let choice = chatBeneath?.permissionChoice {
-                shown.append(ProfileSection(id: "controls", rows: [SessionDetailViewController.permissionRow(
+                if choice.readOnlyDetails != nil {
+                    shown.append(ProfileSection(id: "controls", rows: [SettingsRow(
+                        id: "permission-mode", title: Strings.ChatActions.permissionMode,
+                        icon: ("shield-checkmark-outline", .blue), value: choice.current, accessory: .chevron,
+                        action: { [weak self] in
+                            guard let self, let current = chatBeneath?.permissionChoice,
+                                  let details = current.readOnlyDetails else { return }
+                            Alerts.show(current.current ?? Strings.ChatActions.permissionMode, details, on: self)
+                        }
+                    )]))
+                } else {
+                    shown.append(ProfileSection(id: "controls", rows: [SessionDetailViewController.permissionRow(
                     choice, choice: { [weak self] in self?.chatBeneath?.permissionChoice },
                     relaid: { [weak self] in self?.showSections() }
-                )]))
+                    )]))
+                }
             }
             shown += frame.sections.flatMap { groups[$0] ?? [] }
         }

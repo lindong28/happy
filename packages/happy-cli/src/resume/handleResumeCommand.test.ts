@@ -127,6 +127,14 @@ describe('parseResumeCommandArgs', () => {
 });
 
 describe('buildResumeLaunch', () => {
+    it.each(['terminal', 'daemon'] as const)('preserves native configuration when resumed by %s', startedBy => {
+        const session = createReconnectableSession();
+        const launch = buildResumeLaunch({
+            ...session, metadata: { ...session.metadata, codexNativeConfig: true },
+        }, { startedBy });
+        expect(launch.args).toEqual(['codex', '--resume', session.metadata.codexThreadId, '--native-config', '--started-by', startedBy]);
+    });
+
     it('builds a Codex resume command', () => {
         expect(buildResumeLaunch({
             id: 'session-1',

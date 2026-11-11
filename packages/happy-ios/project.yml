@@ -1,8 +1,9 @@
 # XcodeGen spec for the Xcode project. Generate with `xcodegen` in this
 # directory; the .xcodeproj is not committed.
 #
-# Independent UIKit iOS and AppKit macOS targets, three configurations:
+# Independent UIKit iOS and AppKit macOS targets; the Personal variant is iOS-only:
 #   Debug   -> com.slopus.happy.dev      "Happy (dev)"
+#   Personal -> com.lindong28.happy.personal "Happy Personal" (development signing)
 #   Preview -> com.slopus.happy.preview  "Happy (preview)"
 #   Release -> com.ex3ndr.happy          "Happy"
 # The app target compiles Sources/HappyApp itself and links the package's
@@ -16,12 +17,14 @@ options:
   createIntermediateGroups: true
 configs:
   Debug: debug
+  Personal: release
   Preview: release
   Release: release
 # HAPPY_CALL_AGENT_V3_ID and HAPPY_REVENUE_CAT_APPLE_KEY, from an ignored
 # Config/Call.local.xcconfig or the environment.
 configFiles:
   Debug: Config/Call.xcconfig
+  Personal: Config/Call.xcconfig
   Preview: Config/Call.xcconfig
   Release: Config/Call.xcconfig
 settings:
@@ -87,6 +90,11 @@ targets:
         # replaces it with the profile's "production". Production also has
         # its associated domain.
       configs:
+        Personal:
+          PRODUCT_BUNDLE_IDENTIFIER: com.lindong28.happy.personal
+          INFOPLIST_FILE: App/Info-Personal.plist
+          CODE_SIGN_ENTITLEMENTS: App/Happy-Personal.entitlements
+          SWIFT_ACTIVE_COMPILATION_CONDITIONS: HAPPY_PERSONAL
         Debug:
           PRODUCT_BUNDLE_IDENTIFIER: com.slopus.happy.dev
           INFOPLIST_FILE: App/Info-Development.plist
@@ -254,6 +262,23 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: com.slopus.happy.direct-ui-tests
         TEST_TARGET_NAME: Happy
 schemes:
+  Happy Personal:
+    build:
+      targets:
+        Happy: [run, test, analyze]
+        HappyUIKitTests: [test]
+    run:
+      config: Personal
+    test:
+      config: Personal
+      targets:
+        - HappyUIKitTests
+    analyze:
+      config: Personal
+    profile:
+      config: Personal
+    archive:
+      config: Personal
   Happy Mac:
     build:
       targets:

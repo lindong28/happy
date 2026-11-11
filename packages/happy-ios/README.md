@@ -15,6 +15,27 @@ xtool dev build                    # Linux: the dev app bundle, needs `xtool sdk
 xcodegen && open Happy.xcodeproj   # macOS
 ```
 
+## Codex native configuration development
+
+The personal downstream fork adds a read-only view for Happy CLI sessions started with `happy codex --native-config`. The composer reads the model, reasoning effort and permission values published from Codex's resolved thread response. It ignores old composer picks and account defaults for those sessions, and sends prompts without model, effort or permission overrides. Other session modes keep their existing behavior. See the [CLI development status](../happy-cli/README.md#codex-手机接续开发分支验证状态) for the remaining end-to-end checks.
+
+This is development work, not a released iPhone build. Core tests run on macOS with `swift test --build-system native --filter NativeConfigComposerTests`; they do not compile UIKit or prove device behavior. A simulator runtime is required for the Xcode simulator build. Device installation additionally needs a signing team and Developer Mode. Use a separate, developer-owned bundle identity for a personal build so it does not replace the official app.
+
+An Apple Personal Team can test on a personal device, but its provisioning expires after seven days; see [Apple's account overview](https://developer.apple.com/help/account/basics/about-your-developer-account/). Apple's [capability table](https://developer.apple.com/help/account/reference/supported-capabilities-ios/) does not provide remote push or Sign in with Apple to free accounts. The `Happy Personal` scheme uses `com.lindong28.happy.personal`, an empty entitlement set and a separate app named Happy Personal. It leaves the upstream variants intact, omits the official `happy` URL scheme, and pairs through its own in-app scanner. It does not register for remote push; its notification settings report Unsupported. Long-term notification delivery remains unverified: the upstream app exchanges APNs tokens through its Expo project, so changing only a bundle identifier does not establish fork notification delivery.
+
+From this directory, generate and build the development variant:
+
+```sh
+xcodegen
+xcodebuild -project Happy.xcodeproj -scheme 'Happy Personal' \
+  -configuration Personal -destination 'generic/platform=iOS Simulator' \
+  -derivedDataPath .build-personal CODE_SIGNING_ALLOWED=NO build
+```
+
+The simulator build completed on Xcode 26.6 with the iOS 26.5 runtime. A Personal Team build was also signed, installed and opened on an iPhone 14 running iOS 27.2. That device completed pairing, prompt exchange, native blocking/asynchronous questions, an ask-user MCP form, full local configuration details and session resume after a native Codex CLI round. Reinstalling the updated build preserved its account and conversation. These are development checks on one phone and one Mac; remote notifications, cellular recovery and multiple machines remain unverified.
+
+`Personal` uses release compilation conditions consistently with its Swift packages, while keeping automatic development signing. On-device builds require your own `DEVELOPMENT_TEAM`, a connected trusted iPhone with Developer Mode enabled, and an Apple Account signed into Xcode. Trust your own developer certificate in iPhone Settings if first launch requires it. Other adopters must supply their own `PRODUCT_BUNDLE_IDENTIFIER` as an Xcode build setting. Do not use this development scheme for App Store distribution.
+
 ## Production continuation
 
 The native iOS app continues the existing `com.ex3ndr.happy` App Store Connect

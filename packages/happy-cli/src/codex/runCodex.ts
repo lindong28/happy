@@ -36,6 +36,8 @@ import {
     mapCodexProcessorMessageToSessionEnvelopes,
 } from './utils/sessionProtocolMapper';
 import { resumeExistingThread } from './resumeExistingThread';
+import { nativeConfigMetadata } from './nativeConfigMetadata';
+import { askMcpElicitation } from './mcpElicitation';
 import { emitReadyIfIdle } from './emitReadyIfIdle';
 import { enqueueCodexUserText, isCodexClearText } from './codexClearCommand';
 import { downloadCodexFileEventAttachment } from './utils/attachmentEvents';
@@ -49,7 +51,7 @@ import {
 } from './codexPrompt';
 import { discoverCodexSkillCommands } from './codexSkills';
 import { CodexRemoteModeState } from './remoteModeState';
-import { QuestionForms, QuestionDeliveryError } from './questionForms';
+import { QuestionForms, QuestionDeliveryError, bindQuestionFormDisplay } from './questionForms';
 import { nativeQuestionForm, nativeQuestionAnswers, asyncQuestionForm, asyncQuestionReply, type AsyncQuestionItem } from './userQuestions';
 import {
     codexGoalActionCapabilities,
@@ -86,12 +88,7 @@ function hasCodexSubagentReference(message: Record<string, unknown>): boolean {
 
 const DEFAULT_CODEX_MODEL = 'gpt-6.1-sol';
 const DEFAULT_CODEX_EFFORT: ReasoningEffort = 'medium';
-// Codex's app-server protocol requires a concrete approval policy and sandbox
-// on every turn, so unlike Claude there is no "send nothing" here. This is the
-// closest honest equivalent: `auto` is Codex's own shipped default preset
-// (on-request approvals inside the workspace sandbox), so leaving the picker on
-// Default lands where plain `codex` would. It used to be 'yolo', which quietly
-// gave full access to anyone who never touched the picker.
+// Happy's default preset. Native-config sessions omit per-turn overrides instead.
 const DEFAULT_CODEX_PERMISSION_MODE: PermissionMode = 'auto';
 
 /**
@@ -101,11 +98,15 @@ export async function runCodex(opts: {
     credentials: Credentials;
     startedBy?: 'daemon' | 'terminal';
     noSandbox?: boolean;
+    nativeConfig?: boolean;
     resumeThreadId?: string;
     permissionMode?: PermissionMode;
     model?: string;
     effort?: ReasoningEffort;
 }): Promise<void> {
+    if (opts.nativeConfig && (opts.noSandbox || opts.model !== undefined || opts.effort !== undefined || opts.permissionMode !== undefined)) {
+        throw new Error('Native configuration cannot be combined with Happy model, effort, permission or sandbox overrides.');
+    }
     // Early check: ensure Codex CLI is installed before proceeding
     try {
         execSync('codex --version', { encoding: 'utf8', stdio: 'pipe', windowsHide: true });
@@ -142,8 +143,11 @@ export async function runCodex(opts: {
     //
 
     const settings = await readSettings();
+    if (opts.nativeConfig && settings?.sandboxConfig?.enabled) {
+        throw new Error('Native configuration conflicts with the enabled Happy sandbox. Use the normal happy codex command to retain that sandbox.');
+    }
     let machineId = settings?.machineId;
-    const sandboxConfig = opts.noSandbox ? undefined : settings?.sandboxConfig;
+    const sandboxConfig = opts.noSandbox || opts.nativeConfig ? undefined : settings?.sandboxConfig;
     if (!machineId) {
         console.error(`[START] No machine ID found in settings, which is unexpected since authAndSetupMachineIfNeeded should have created it. Please report this issue on https://github.com/slopus/happy-cli/issues`);
         process.exit(1);
@@ -174,6 +178,8 @@ export async function runCodex(opts: {
         ...(forkedFromMessageId ? { forkedFromMessageId } : {}),
         ...(isSideChat ? { isSideChat: true } : {}),
     });
+
+    if (opts.nativeConfig) Object.assign(metadata, nativeConfigMetadata());
 
     const skillCommands = await discoverCodexSkillCommands();
     if (skillCommands.length > 0) {
@@ -296,8 +302,8 @@ export async function runCodex(opts: {
     // Use shared PermissionMode type from api/types for cross-agent compatibility
     const remoteModeState = new CodexRemoteModeState({
         permissionMode: initialPermissionMode,
-        model: opts.model ?? DEFAULT_CODEX_MODEL,
-        effort: opts.effort ?? DEFAULT_CODEX_EFFORT,
+        model: opts.nativeConfig ? undefined : opts.model ?? DEFAULT_CODEX_MODEL,
+        effort: opts.nativeConfig ? undefined : opts.effort ?? DEFAULT_CODEX_EFFORT,
     });
     let currentAppendSystemPrompt: string | undefined = undefined;
 
@@ -318,7 +324,10 @@ export async function runCodex(opts: {
         if (isCodexClearText(message.content.text)) cancelQuestions();
         const attachmentsForThisMessage = await session.drainAttachmentsForUserMessage();
 
-        const modeResolution = remoteModeState.resolve(message.meta);
+        const modeResolution = remoteModeState.resolve(opts.nativeConfig ? undefined : message.meta);
+        if (opts.nativeConfig && message.meta && ['model', 'effort', 'permissionMode'].some(key => Object.prototype.hasOwnProperty.call(message.meta, key))) {
+            session.sendSessionEvent({ type: 'message', message: 'Experimental native configuration: this session uses the local Codex settings. The mobile model, effort and permission selectors do not change its settings.' });
+        }
         if (modeResolution.permission.kind === 'updated') {
             logger.debug(`[Codex] Permission mode updated from user message to: ${modeResolution.permissionMode}`);
         } else if (modeResolution.permission.kind === 'ignored') {
@@ -342,7 +351,7 @@ export async function runCodex(opts: {
         }
 
         let messageAppendSystemPrompt = currentAppendSystemPrompt;
-        if (message.meta?.hasOwnProperty('appendSystemPrompt')) {
+        if (!opts.nativeConfig && message.meta?.hasOwnProperty('appendSystemPrompt')) {
             messageAppendSystemPrompt = message.meta.appendSystemPrompt || undefined;
             currentAppendSystemPrompt = messageAppendSystemPrompt;
             logger.debug(`[Codex] Append system prompt updated from user message: ${messageAppendSystemPrompt ? 'set' : 'reset to none'}`);
@@ -373,6 +382,7 @@ export async function runCodex(opts: {
     session.onUserMessage(handleUserMessage);
     let thinking = false;
     let currentTurnId: string | null = null;
+    bindQuestionFormDisplay(questionForms, message => session.sendSessionProtocolMessage(message), () => currentTurnId);
     let codexStartedSubagents = new Set<string>();
     let codexActiveSubagents = new Set<string>();
     let codexProviderSubagentToSessionSubagent = new Map<string, string>();
@@ -525,7 +535,7 @@ export async function runCodex(opts: {
             }
 
             // Stop Happy MCP server
-            happyServer.stop();
+            happyServer?.stop();
 
             logger.debug('[Codex] Session termination complete, exiting');
             process.exit(0);
@@ -583,7 +593,7 @@ export async function runCodex(opts: {
 
     client = new CodexAppServerClient(sandboxConfig);
 
-    permissionHandler = new CodexPermissionHandler(session);
+    permissionHandler = new CodexPermissionHandler(session, !opts.nativeConfig);
     // Drop any permission requests left in agent state from a previous CLI
     // process that died while a tool prompt was open — see the matching
     // call in claudeRemoteLauncher for the full rationale.
@@ -669,7 +679,16 @@ export async function runCodex(opts: {
         return { ok: true };
     });
 
-    // Approval handler: routes server → client approval requests to our permission handler
+    if (opts.nativeConfig) {
+        client.setConfigurationHandler(config => {
+            session.updateMetadata(meta => ({ ...meta, ...nativeConfigMetadata(config) }));
+        });
+    }
+
+    client.setMcpElicitationHandler((request, signal) =>
+        askMcpElicitation(questionForms, `codex-mcp-question:${randomUUID()}`, request, signal));
+
+    // Native questions and MCP forms collect answers; tool approvals stay separate.
     client.setQuestionHandler(async (request, signal) => {
         const form = nativeQuestionForm(request.questions);
         const id = `codex-question:${randomUUID()}`;
@@ -708,8 +727,8 @@ export async function runCodex(opts: {
             ? remoteModeState.currentPermissionMode
             : undefined;
 
-        if (shouldAutoApproveCodexApproval(activePermissionMode, client.sandboxEnabled)
-            || (latestPermissionMode !== undefined && shouldAutoApproveCodexApproval(latestPermissionMode, client.sandboxEnabled))) {
+        if (!opts.nativeConfig && (shouldAutoApproveCodexApproval(activePermissionMode, client.sandboxEnabled)
+            || (latestPermissionMode !== undefined && shouldAutoApproveCodexApproval(latestPermissionMode, client.sandboxEnabled)))) {
             logger.debug(`[Codex] Auto-approving ${params.type} approval in ${activePermissionMode} mode (latest: ${latestPermissionMode ?? 'n/a'})`);
             return 'approved';
         }
@@ -886,18 +905,21 @@ export async function runCodex(opts: {
     });
 
     // Start Happy MCP server (HTTP) and prepare STDIO bridge config for Codex
-    const happyServer = await startHappyServer(session);
+    const happyServer = opts.nativeConfig ? undefined : await startHappyServer(session);
     // Launch the bridge via `node <path>` (rather than relying on the .mjs shebang)
     // so it works on Windows, where Windows can't execute shebang scripts directly.
     // codex would otherwise fail to start the MCP server, the change_title tool would
     // not be visible to the model, and the model would improvise with shell echoes.
     const bridgeEntrypoint = join(projectPath(), 'bin', 'happy-mcp.mjs');
-    const mcpServers = {
+    const mcpServers = happyServer ? {
         happy: {
             command: process.execPath,
             args: ['--no-warnings', '--no-deprecation', bridgeEntrypoint, '--url', happyServer.url]
         }
-    } as const;
+    } : undefined;
+    if (opts.nativeConfig) {
+        session.sendSessionEvent({ type: 'message', message: 'Local Codex settings are active. Happy does not override the model, reasoning effort, permissions, hooks or MCP configuration. The compatible personal iPhone app shows these settings read-only; change them in Codex on the computer.' });
+    }
     let first = true;
     let appendSystemPromptInjected = false;
 
@@ -1030,7 +1052,7 @@ export async function runCodex(opts: {
                 // Map permission mode to approval policy and sandbox.
                 // With app-server, these are per-turn — no restart needed on mode change.
                 const sandboxManagedByHappy = client.sandboxEnabled;
-                const executionPolicy = resolveCodexExecutionPolicy(
+                const executionPolicy = opts.nativeConfig ? { approvalPolicy: undefined, sandbox: undefined } : resolveCodexExecutionPolicy(
                     message.mode.permissionMode,
                     sandboxManagedByHappy,
                 );
@@ -1082,7 +1104,7 @@ export async function runCodex(opts: {
                     message: message.message,
                     mode: message.mode,
                     includeAppendSystemPrompt,
-                    includeTitleInstruction: first,
+                    includeTitleInstruction: first && !opts.nativeConfig,
                 });
 
                 const result = await client.sendTurnAndWait(turnPrompt, {
@@ -1164,7 +1186,7 @@ export async function runCodex(opts: {
         logger.debug('[codex]: client.disconnect done');
         // Stop Happy MCP server
         logger.debug('[codex]: happyServer.stop');
-        happyServer.stop();
+        happyServer?.stop();
 
         // Clean up ink UI
         if (process.stdin.isTTY) {

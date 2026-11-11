@@ -32,6 +32,12 @@ public struct ComposerPicks: Equatable, Sendable {
 /// leaving the account default to stand for it; the order they are read in
 /// is the difference between showing what the agent will do and a guess.
 public struct ComposerModes: Equatable, Sendable {
+    public static func usesNativeConfig(_ metadata: JSONValue?) -> Bool {
+        metadata?["flavor"]?.stringValue == "codex"
+            && metadata?["codexNativeConfig"]?.boolValue == true
+            && !RigCatalog.isRig(metadata)
+    }
+
     public var availableModes: [ModeOption]
     public var permissionMode: ModeOption?
     public var availableModels: [ModeOption]
@@ -62,6 +68,25 @@ public struct ComposerModes: Equatable, Sendable {
     /// Nil metadata is a session that doesn't exist yet: every row falls
     /// back to the defaults.
     public init(metadata: JSONValue?, picks: ComposerPicks, agentDefaultOverrides: [String: JSONValue]) {
+        if Self.usesNativeConfig(metadata) {
+            // These are readouts published by Codex, not selectable presets.
+            // Never substitute stale local picks or account defaults.
+            func published(_ catalog: String, _ current: String) -> ModeOption? {
+                guard let key = metadata?[current]?.stringValue,
+                      let entry = metadata?[catalog]?.arrayValue?.first(where: { $0["code"]?.stringValue == key }),
+                      let name = entry["value"]?.stringValue else { return nil }
+                return ModeOption(key: key, name: name, description: entry["description"]?.stringValue, isDisabled: true)
+            }
+            let permission = published("operatingModes", "currentOperatingModeCode")
+            let model = published("models", "currentModelCode")
+            let effort = published("thoughtLevels", "currentThoughtLevelCode")
+            self.init(
+                availableModes: permission.map { [$0] } ?? [], permissionMode: permission,
+                availableModels: model.map { [$0] } ?? [], modelMode: model,
+                availableEffortLevels: effort.map { [$0] } ?? [], effortLevel: effort
+            )
+            return
+        }
         typealias Options = ModelModeOptions
         let flavor = metadata?["flavor"]?.stringValue
         let cliVersion = metadata?["version"]?.stringValue.flatMap { $0.isEmpty ? nil : $0 }
