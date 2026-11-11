@@ -2,6 +2,19 @@ import { describe, expect, it } from 'vitest';
 import { appendDaemonSpawnModeArgs, shouldForwardDaemonPermissionMode } from './spawnModeArgs';
 
 describe('daemon spawn mode arguments', () => {
+  it('uses native Codex settings only on an opted-in daemon', () => {
+    const options = { directory: '/repo', permissionMode: 'yolo', modelMode: 'stale-model', effortLevel: 'low' };
+    const native: string[] = [];
+    appendDaemonSpawnModeArgs(native, options, 'codex', true);
+    expect(native).toEqual(['--native-config']);
+    const normal: string[] = [];
+    appendDaemonSpawnModeArgs(normal, options, 'codex', false);
+    expect(normal).toEqual(['--permission-mode', 'yolo', '--model', 'stale-model', '--effort', 'low']);
+    const claude: string[] = [];
+    appendDaemonSpawnModeArgs(claude, options, 'claude', true);
+    expect(claude).toEqual(normal);
+  });
+
   it('forwards Codex default because it is a concrete ask-first policy', () => {
     const args: string[] = [];
 

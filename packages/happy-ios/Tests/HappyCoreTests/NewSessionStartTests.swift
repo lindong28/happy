@@ -1271,6 +1271,27 @@ final class WorktreeListTests: XCTestCase {
 /// HomeDock.tsx's option derivation and useStartSessionFromDraft.ts's
 /// preamble, built from stored records.
 final class NewSessionChoicesTests: XCTestCase {
+    func testNativeCodexMachineUsesLocalSettingsForChoicesAndLaunch() throws {
+        let draft = NewSessionDraft(selectedMachineId: "m1", agentType: .codex, pickedAgentType: .codex, permissionMode: "yolo", modelMode: "stale-model", effortLevel: "low")
+        for native in [true, false] {
+            let computer = machine("m1", metadata: ["codexNativeConfig": .bool(native)])
+            let choices = NewSessionChoices(.init(draft: draft, machines: [computer], sessions: []))
+            let launch = try NewSessionLaunch.resolve(draft: draft, pickedAgent: .codex, machines: [computer], sessions: [], agentDefaultOverrides: [:], prompt: "hello", attachments: []).get()
+            if native {
+                XCTAssertEqual(choices.currentModel?.name, "Local settings")
+                XCTAssertEqual(choices.currentPermission?.isDisabled, true)
+                XCTAssertEqual(choices.currentModel?.isDisabled, true)
+                XCTAssertNil(choices.currentEffort)
+                XCTAssertEqual(launch.permissionMode, "native-config")
+                XCTAssertEqual(launch.modelMode, "native-config")
+                XCTAssertNil(launch.effortLevel)
+            } else {
+                XCTAssertNotEqual(choices.currentModel?.name, "Local settings")
+                XCTAssertEqual(launch.permissionMode, "yolo")
+            }
+        }
+    }
+
     private func machine(_ id: String, name: String = "MacBook", active: Bool = true, createdAt: Int64 = 1, metadata: [String: JSONValue] = [:]) -> MachineRecord {
         var values = metadata
         values["displayName"] = values["displayName"] ?? .string(name)

@@ -184,7 +184,8 @@ export class ApiMachineClient {
         // Register spawn session handler
         this.rpcHandlerManager.registerHandler('spawn-happy-session', async (params: any) => {
             const { directory, sessionId, machineId, approvedNewDirectoryCreation, agent, permissionMode, modelMode, effortLevel, environmentVariables, token, resumeClaudeSessionId, resumeCodexThreadId, parentSessionId, forkedFromMessageId, isSideChat } = params || {};
-            logger.debug(`[API MACHINE] Spawning session with params: ${JSON.stringify(params)}`);
+            const { token: _token, environmentVariables: _environment, ...safeParams } = params || {};
+            logger.debug(`[API MACHINE] Spawning session with params: ${JSON.stringify({ ...safeParams, hasToken: !!token, environmentKeys: Object.keys(environmentVariables ?? {}) })}`);
 
             if (!directory) {
                 throw new Error('Directory is required');

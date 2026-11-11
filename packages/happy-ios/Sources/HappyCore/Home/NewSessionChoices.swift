@@ -297,7 +297,8 @@ public struct NewSessionChoices: Equatable, Sendable {
             rig: rigCreation,
             picks: ComposerPicks(permissionMode: draft.permissionMode, modelMode: draft.modelMode, effortLevel: draft.effortLevel),
             overrides: inputs.agentDefaultOverrides,
-            cliVersion: cliVersion
+            cliVersion: cliVersion,
+            codexNativeConfig: selectedChoice?.happyMachine?.metadata?["codexNativeConfig"]?.boolValue == true
         )
         permissionOptions = modes.permissions
         modelOptions = modes.models
@@ -336,8 +337,13 @@ public struct NewSessionChoices: Equatable, Sendable {
         rig: RigSessionCreation?,
         picks: ComposerPicks,
         overrides: [String: JSONValue],
-        cliVersion: String?
+        cliVersion: String?,
+        codexNativeConfig: Bool = false
     ) -> Modes {
+        if agent == .codex && codexNativeConfig && rig == nil {
+            let local = Option(key: "native-config", name: "Local settings", description: "Uses this computer's Codex configuration. Actual settings appear after the session starts.", isDisabled: true)
+            return Modes(permissions: [local], models: [local], modelSections: [Section(key: "local", title: nil, options: [local])], efforts: [], permission: local, model: local, effort: nil)
+        }
         if let rig {
             let models = rig.models.map {
                 ModeOption(key: $0.key, name: $0.name, description: $0.description, providerId: $0.providerId, providerName: $0.providerName)
@@ -569,7 +575,7 @@ extension NewSessionLaunch {
         let picks = agentChanged
             ? ComposerPicks()
             : ComposerPicks(permissionMode: draft.permissionMode, modelMode: draft.modelMode, effortLevel: draft.effortLevel)
-        let modes = NewSessionChoices.modes(agent: agent, rig: rig, picks: picks, overrides: agentDefaultOverrides, cliVersion: cliVersion)
+        let modes = NewSessionChoices.modes(agent: agent, rig: rig, picks: picks, overrides: agentDefaultOverrides, cliVersion: cliVersion, codexNativeConfig: machine.metadata?["codexNativeConfig"]?.boolValue == true)
         let permission = modes.permission
         let model = modes.model
         let effort = modes.effort

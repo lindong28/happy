@@ -55,6 +55,7 @@ export const initialMachineMetadata: MachineMetadata = {
   homeDir: os.homedir(),
   happyHomeDir: configuration.happyHomeDir,
   happyLibDir: projectPath(),
+  codexNativeConfig: process.env.HAPPY_CODEX_NATIVE_CONFIG === '1',
   cliAvailability: detectCLIAvailability(),
   resumeSupport: { ...detectResumeSupport(), rpcAvailable: true },
 };
@@ -276,7 +277,13 @@ export async function startDaemon(): Promise<void> {
 
     // Spawn a new session (sessionId reserved for future --resume functionality)
     const spawnSession = async (options: SpawnSessionOptions): Promise<SpawnSessionResult> => {
-      logger.debugLargeJson('[DAEMON RUN] Spawning session', options);
+      const { token, environmentVariables, ...safeOptions } = options;
+      logger.debugLargeJson('[DAEMON RUN] Spawning session', { ...safeOptions, hasToken: !!token, environmentKeys: Object.keys(environmentVariables ?? {}) });
+
+      if (options.agent === 'codex' && initialMachineMetadata.codexNativeConfig &&
+          (options.token || Object.keys(options.environmentVariables ?? {}).length > 0)) {
+        return { type: 'error', errorMessage: 'This machine uses local Codex settings. Start without a phone token or environment overrides; select the account on the computer.' };
+      }
 
       const { directory, sessionId, machineId, approvedNewDirectoryCreation = true } = options;
       let directoryCreated = false;
@@ -448,7 +455,7 @@ export async function startDaemon(): Promise<void> {
             '--happy-starting-mode', 'remote',
             '--started-by', 'daemon',
           ];
-          appendDaemonSpawnModeArgs(launchArgs, options, agent);
+          appendDaemonSpawnModeArgs(launchArgs, options, agent, initialMachineMetadata.codexNativeConfig);
           const modeFragment = launchArgs.map(shellescape).join(' ');
           const fullCommand = `node --no-warnings --no-deprecation ${shellescape(cliPath)} ${modeFragment}${resumeFragment}`;
           const sanitizedTmuxCommand = wrapTmuxCommandWithSessionEnvironmentSanitizer(fullCommand, extraEnv);
@@ -561,7 +568,7 @@ export async function startDaemon(): Promise<void> {
             '--happy-starting-mode', 'remote',
             '--started-by', 'daemon'
           ];
-          appendDaemonSpawnModeArgs(args, options, agentCommand);
+          appendDaemonSpawnModeArgs(args, options, agentCommand, initialMachineMetadata.codexNativeConfig);
 
           // Resume ids attach the new Happy session to a pre-existing provider
           // conversation created by the fork / duplicate RPC.
@@ -829,11 +836,12 @@ export async function startDaemon(): Promise<void> {
           { startedBy: 'daemon', claudeStartingMode: 'remote' },
         );
 
-        if (options?.model) {
+        const nativeCodex = metadata.flavor === 'codex' && metadata.codexNativeConfig === true;
+        if (!nativeCodex && options?.model) {
           launch.args.push('--model', options.model);
         }
         const resumePermissionMode = options?.permissionMode;
-        if (shouldForwardDaemonPermissionMode(metadata.flavor ?? 'claude', resumePermissionMode)) {
+        if (!nativeCodex && shouldForwardDaemonPermissionMode(metadata.flavor ?? 'claude', resumePermissionMode)) {
           launch.args.push('--permission-mode', resumePermissionMode);
         }
 

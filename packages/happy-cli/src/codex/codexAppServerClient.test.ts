@@ -17,6 +17,7 @@ const {
 
 vi.mock('node:child_process', () => ({
     execSync: mockExecSync,
+    execFileSync: mockExecSync,
     spawn: mockSpawn,
 }));
 
@@ -117,6 +118,7 @@ describe('CodexAppServerClient sandbox integration', () => {
 
     beforeEach(() => {
         vi.clearAllMocks();
+        vi.unstubAllEnvs();
         process.env.RUST_LOG = originalRustLog;
         mockExecSync.mockReturnValue('codex-cli 0.153.0');
         mockInitializeSandbox.mockResolvedValue(mockSandboxCleanup);
@@ -125,7 +127,18 @@ describe('CodexAppServerClient sandbox integration', () => {
     });
 
     afterAll(() => {
+        vi.unstubAllEnvs();
         process.env.RUST_LOG = originalRustLog;
+    });
+
+    it('uses the configured executable for both version checks and app-server', async () => {
+        const { CodexAppServerClient } = await import('./codexAppServerClient');
+        vi.stubEnv('HAPPY_CODEX_PATH', '/test path/codex-personal');
+        const client = new CodexAppServerClient();
+        await client.connect();
+        expect(mockExecSync).toHaveBeenCalledWith('/test path/codex-personal', ['--version'], expect.any(Object));
+        expect(mockSpawn).toHaveBeenCalledWith('/test path/codex-personal', ['app-server', '--listen', 'stdio://'], expect.any(Object));
+        await client.disconnect();
     });
 
     it('reports goal action support for Codex versions with goal action requests', async () => {

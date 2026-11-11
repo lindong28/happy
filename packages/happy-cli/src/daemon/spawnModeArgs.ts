@@ -15,8 +15,14 @@ export function appendDaemonSpawnModeArgs(
   args: string[],
   options: SpawnSessionOptions,
   agent: string,
+  codexNativeConfig = false,
 ): void {
   if (agent !== 'claude' && agent !== 'codex') return;
+
+  if (agent === 'codex' && codexNativeConfig) {
+    args.push('--native-config');
+    return;
+  }
 
   if (shouldForwardDaemonPermissionMode(agent, options.permissionMode)) {
     args.push('--permission-mode', options.permissionMode);

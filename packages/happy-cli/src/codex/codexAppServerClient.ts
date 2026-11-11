@@ -13,7 +13,7 @@
  * app-server wrapper or approval callbacks. See docs/plans/codex-app-server-migration.md.
  */
 
-import { execSync, type ChildProcess } from 'node:child_process';
+import { execSync, execFileSync, type ChildProcess } from 'node:child_process';
 import { spawn as crossSpawn } from 'cross-spawn';
 import { createInterface, type Interface as ReadlineInterface } from 'node:readline';
 import { logger } from '@/ui/logger';
@@ -122,7 +122,9 @@ function parseCodexCliVersion(version: string): { major: number; minor: number; 
 
 function readCodexCliVersion(): { major: number; minor: number; patch: number } | null {
     try {
-        const version = execSync('codex --version', { encoding: 'utf8', windowsHide: true }).trim();
+        const version = (process.env.HAPPY_CODEX_PATH
+            ? execFileSync(process.env.HAPPY_CODEX_PATH, ['--version'], { encoding: 'utf8', windowsHide: true, timeout: 10000 })
+            : execSync('codex --version', { encoding: 'utf8', windowsHide: true })).trim();
         return parseCodexCliVersion(version);
     } catch {
         return null;
@@ -643,14 +645,14 @@ export class CodexAppServerClient {
             );
         }
 
-        let command = 'codex';
+        let command = process.env.HAPPY_CODEX_PATH || 'codex';
         let args = ['app-server', '--listen', 'stdio://'];
         this.sandboxEnabled = false;
 
         if (this.sandboxConfig?.enabled && process.platform !== 'win32') {
             try {
                 this.sandboxCleanup = await initializeSandbox(this.sandboxConfig, process.cwd());
-                const wrapped = await wrapForMcpTransport('codex', ['app-server', '--listen', 'stdio://']);
+                const wrapped = await wrapForMcpTransport(command, args);
                 command = wrapped.command;
                 args = wrapped.args;
                 this.sandboxEnabled = true;

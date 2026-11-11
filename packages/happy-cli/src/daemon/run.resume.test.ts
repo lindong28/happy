@@ -21,7 +21,8 @@ vi.mock('os', async (importOriginal) => {
   const original = await importOriginal<typeof import('os')>();
   return { ...original, default: { ...original, homedir: () => process.env.HAPPY_HOME_DIR! } };
 });
-vi.mock('fs/promises', () => ({ default: { access: mocks.access } }));
+vi.mock('fs/promises', () => ({ default: { access: mocks.access, writeFile: vi.fn() } }));
+vi.mock('tmp', () => ({ dirSync: () => ({ name: '/test-only/codex-home' }) }));
 vi.mock('@/ui/logger', () => ({ logger: mocks.logger }));
 vi.mock('@/configuration', () => ({ configuration: { serverUrl: 'http://test.invalid', happyHomeDir: '/test-only' } }));
 vi.mock('@/ui/auth', () => ({ authAndSetupMachineIfNeeded: async () => ({ credentials: { token: 'test-token' }, machineId: 'machine-1' }) }));
@@ -55,7 +56,7 @@ vi.mock('@/api/api', () => ({ ApiClient: { create: async () => ({
   }),
 }) } }));
 
-import { startDaemon } from './run';
+import { initialMachineMetadata, startDaemon } from './run';
 
 const dataKey = new Uint8Array(32).fill(1);
 const metadata = { path: '/project', machineId: 'machine-1', flavor: 'claude', claudeSessionId: 'claude-old' };
@@ -64,6 +65,7 @@ const fallback = {
   encryptionKey: encodeBase64(dataKey), encryptionVariant: 'dataKey',
 };
 const realKill = process.kill.bind(process);
+const originalNativeConfig = initialMachineMetadata.codexNativeConfig;
 
 async function boot() {
   await expect(startDaemon()).rejects.toThrow('test exit');
@@ -71,6 +73,7 @@ async function boot() {
 
 describe('daemon resume fallback', () => {
   beforeEach(() => {
+    initialMachineMetadata.codexNativeConfig = false;
     vi.clearAllMocks();
     mocks.persisted = {};
     mocks.persistSession.mockReset();
@@ -87,8 +90,35 @@ describe('daemon resume fallback', () => {
   });
 
   afterEach(() => {
+    initialMachineMetadata.codexNativeConfig = originalNativeConfig;
+    vi.unstubAllEnvs();
     vi.restoreAllMocks();
     vi.useRealTimers();
+  });
+
+  it.each([{ token: 'fixture-secret' }, { environmentVariables: { CODEX_HOME: '/foreign-home' } }])('rejects remote identity or environment overrides in native mode: %j', async (overrides) => {
+    initialMachineMetadata.codexNativeConfig = true;
+    await boot();
+    expect(await mocks.handlers.spawnSession({ directory: '/project', agent: 'codex', ...overrides })).toMatchObject({
+      type: 'error', errorMessage: expect.stringContaining('local Codex'),
+    });
+    expect(mocks.spawn).not.toHaveBeenCalled();
+    expect(mocks.access).not.toHaveBeenCalled();
+    expect(JSON.stringify(mocks.logger.debugLargeJson.mock.calls)).not.toContain('fixture-secret');
+  });
+
+  it.each([false, true])('starts a locally configured Codex without remote overrides (native=%s)', async (native) => {
+    initialMachineMetadata.codexNativeConfig = native;
+    await boot();
+    expect(await mocks.handlers.spawnSession({ directory: '/project', agent: 'codex' })).toMatchObject({ type: 'success' });
+    expect(mocks.spawn.mock.calls[0][0].includes('--native-config')).toBe(native);
+  });
+
+  it('retains remote token support in standard mode without logging the token', async () => {
+    await boot();
+    expect(await mocks.handlers.spawnSession({ directory: '/project', agent: 'codex', token: 'fixture-secret' })).toMatchObject({ type: 'success' });
+    expect(mocks.spawn.mock.calls[0][1].env.CODEX_HOME).toBe('/test-only/codex-home');
+    expect(JSON.stringify(mocks.logger.debugLargeJson.mock.calls)).not.toContain('fixture-secret');
   });
 
   it('resumes an untracked old session across fresh daemon boots without listing sessions', async () => {
@@ -166,6 +196,18 @@ describe('daemon resume fallback', () => {
     mocks.webhook('old-session', codexMetadata, { ...fallback, encryptionKey: dataKey });
     expect(await mocks.handlers.resumeSession('old-session')).toEqual({ type: 'success', sessionId: 'old-session' });
     expect(mocks.spawn.mock.calls.length).toBe(0);
+  });
+
+  it.each([true, false])('keeps resumed Codex configuration native=%s despite stale phone selections', async (native) => {
+    await boot();
+    const codexMetadata = { ...metadata, flavor: 'codex', codexThreadId: 'thread-old', codexNativeConfig: native };
+    await mocks.handlers.resumeSession('old-session', {
+      fallback: { ...fallback, metadata: codexMetadata }, model: 'stale-model', permissionMode: 'yolo',
+    });
+    const args = mocks.spawn.mock.calls[0][0];
+    expect(args.includes('--native-config')).toBe(native);
+    expect(args.includes('--model')).toBe(!native);
+    expect(args.includes('--permission-mode')).toBe(!native);
   });
 
   it('coalesces concurrent resumes into one owner before its webhook', async () => {
