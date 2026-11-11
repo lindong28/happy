@@ -68,7 +68,7 @@ happy acp -- custom-agent --flag
 
 2026-11-11 的开发版本已在一台 MacBook 与一台 iPhone 14（iOS 27.2、Personal 开发签名）完成电脑输入、手机追问、原生同步/异步提问和 ask-user MCP 表单答复。MCP 表单覆盖字符串选项、可选题留空；其他 JSON Schema 类型仍按明确不支持处理。会话详情显示实际模型及完整权限/沙箱读数。退出 Happy 后可用 `codex resume <codex-thread-id>` 接回；退出原生 CLI 后，手机的 Resume Session 已恢复同一个 Happy 会话与 Codex thread，并保留前文上下文。切换前先退出当前执行端，避免两个执行器同时推进同一 thread。未启动 Happy 的原生 CLI 不会因此自动向手机同步输出。
 
-测试中实际观察到原有 PreToolUse 提问 hook 的拦截及修正问题后的正常答复，不代表全部 hooks 或审批场景均已验收。手机 Stop 后下一轮输入正常完成，用户切到蜂窝网络并确认收到 CELLULAR_OK。多机、短断网恢复、后台通知、工具批准/拒绝及最终分发仍待验证；以上是开发验证记录，不是正式发布声明。
+测试中实际观察到原有 PreToolUse 提问 hook 的拦截及修正问题后的正常答复，不代表全部 hooks 或审批场景均已验收。手机 Stop 后下一轮输入正常完成，用户切到蜂窝网络并确认收到 CELLULAR_OK。同一手机在 MacBook、Mac Studio、Mac mini 各选一个目录新建会话，两台远端 Mac 各完成一次原线程追问。mini 的待答表单在 App 退到后台和终止重启后仍可提交，回复保留原线程上下文。电脑运行器停止后的状态恢复、物理短断网恢复、后台通知、工具批准/拒绝及最终分发仍待验证；以上是开发验证记录，不是正式发布声明。
 
 定向回归（在 `packages/happy-cli` 下执行）：
 

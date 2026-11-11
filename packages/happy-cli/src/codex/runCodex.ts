@@ -37,6 +37,7 @@ import {
 } from './utils/sessionProtocolMapper';
 import { resumeExistingThread } from './resumeExistingThread';
 import { nativeConfigMetadata } from './nativeConfigMetadata';
+import { registerSessionTermination } from './sessionTermination';
 import { askMcpElicitation } from './mcpElicitation';
 import { emitReadyIfIdle } from './emitReadyIfIdle';
 import { enqueueCodexUserText, isCodexClearText } from './codexClearCommand';
@@ -442,13 +443,14 @@ export async function runCodex(opts: {
     // Turn cancellation uses client.interruptTurn() — no AbortController hack needed.
     let abortController = new AbortController();
     let shouldExit = false;
+    let terminationPromise: Promise<void> | null = null;
 
     /**
      * Handles aborting the current task/inference without exiting the process.
      * This is the equivalent of Claude Code's abort - it stops what's currently
      * happening but keeps the session alive for new prompts.
      */
-    async function handleAbort() {
+    async function handleAbort(restartBackend = true) {
         if (abortInProgress) {
             await abortInProgress;
             return;
@@ -468,7 +470,7 @@ export async function runCodex(opts: {
                 if (client) {
                     const abortResult = await client.abortTurnWithFallback({
                         gracePeriodMs: 3000,
-                        forceRestartOnTimeout: true,
+                        forceRestartOnTimeout: restartBackend,
                     });
                     if (abortResult.forcedRestart) {
                         logger.warn('[Codex] Forced app-server restart after interrupt timeout');
@@ -497,6 +499,17 @@ export async function runCodex(opts: {
 
         await abortInProgress;
         abortInProgress = null;
+    }
+
+    // Unlike Stop, process termination must never start a replacement backend.
+    // Await an already-running Stop before the final disconnect as well.
+    function terminateSession(): Promise<void> {
+        shouldExit = true;
+        terminationPromise ??= (async () => {
+            await handleAbort(false);
+            await client?.disconnect();
+        })().catch(error => logger.debug('[codex]: Error during termination', error));
+        return terminationPromise;
     }
 
     /**
@@ -546,7 +559,7 @@ export async function runCodex(opts: {
     };
 
     // Register abort handler
-    session.rpcHandlerManager.registerHandler('abort', handleAbort);
+    session.rpcHandlerManager.registerHandler('abort', () => handleAbort());
 
     registerKillSessionHandler(session.rpcHandlerManager, handleKillSession);
 
@@ -570,8 +583,7 @@ export async function runCodex(opts: {
             onExit: async () => {
                 // Exit the agent
                 logger.debug('[codex]: Exiting agent via Ctrl-C');
-                shouldExit = true;
-                await handleAbort();
+                await terminateSession();
             }
         }), {
             exitOnCtrlC: false,
@@ -922,6 +934,10 @@ export async function runCodex(opts: {
     }
     let first = true;
     let appendSystemPromptInjected = false;
+    const removeTerminationHandlers = registerSessionTermination(() => {
+        logger.debug('[codex]: Termination signal received; leaving session resumable');
+        void terminateSession();
+    });
 
     try {
         logger.debug('[codex]: client.connect begin');
@@ -1107,6 +1123,8 @@ export async function runCodex(opts: {
                     includeTitleInstruction: first && !opts.nativeConfig,
                 });
 
+                // A signal may have arrived while thread/image preparation awaited I/O.
+                if (shouldExit) break;
                 const result = await client.sendTurnAndWait(turnPrompt, {
                     model: message.mode.model,
                     approvalPolicy: executionPolicy.approvalPolicy,
@@ -1159,7 +1177,9 @@ export async function runCodex(opts: {
 
     } finally {
         // Clean up resources when main loop exits
+        clearInterval(keepAliveInterval);
         cancelQuestions();
+        await terminationPromise;
         logger.debug('[codex]: Final cleanup start');
         logActiveHandles('cleanup-start');
 
@@ -1172,6 +1192,10 @@ export async function runCodex(opts: {
         try {
             logger.debug('[codex]: sendSessionDeath');
             session.sendSessionDeath();
+            // Match Claude's graceful shutdown: confirm inactive over HTTP
+            // before closing the socket, without archiving session metadata.
+            const deactivated = await api.deactivateSession(session.sessionId);
+            logger.debug(`[codex]: Session deactivation confirmed=${deactivated}`);
             logger.debug('[codex]: flush begin');
             await session.flush();
             logger.debug('[codex]: flush done');
@@ -1209,5 +1233,6 @@ export async function runCodex(opts: {
 
         logActiveHandles('cleanup-end');
         logger.debug('[codex]: Final cleanup completed');
+        removeTerminationHandlers();
     }
 }
