@@ -56,7 +56,7 @@ happy acp -- custom-agent --flag
 
 同步提问通过 `item/tool/requestUserInput` 回答；异步提问使用 Codex 的 `send_user_message_question_reply` 包装，绑定原线程。明确被拒绝的答复可以重试；送达结果未知时不会自动重发。原生请求撤回、清空上下文和取消时会撤销相应待答控件。秘密输入不使用普通手机表单。
 
-2026-11-11 的无模型探针先通过官方中继取得 iPhone 消息往返，以及选择、自由文字两种表单的提交和电脑回显读数。随后真实 Codex 单机测试取得下述接续结果；进程重启后待答问题恢复、多机、手机通知及断网恢复仍待验收。请勿将开发分支直接替换日常入口。
+2026-11-11 的无模型探针先通过官方中继取得 iPhone 消息往返，以及选择、自由文字两种表单的提交和电脑回显读数。随后真实 Codex 测试取得下述单机、多机和恢复结果；手机通知仍待验收。安装须使用配套 fork，不能用上游 npm 包替代。
 
 本分支另提供实验参数 `happy codex --native-config`：让 Codex 从启动环境读取自身配置，Happy 不传模型、推理强度、审批或沙箱覆盖，不注入标题 MCP，也不按 Happy 权限预设自动批准。参数与模型、权限等覆盖参数冲突时拒绝启动；Happy 自身沙箱开启时同样拒绝。此模式标记保存在会话 metadata，供 `happy resume <happy-session-id>` 的恢复参数构造使用，不需要迁移既有会话。
 
@@ -68,7 +68,9 @@ happy acp -- custom-agent --flag
 
 2026-11-11 的开发版本已在一台 MacBook 与一台 iPhone 14（iOS 27.2、Personal 开发签名）完成电脑输入、手机追问、原生同步/异步提问和 ask-user MCP 表单答复。MCP 表单覆盖字符串选项、可选题留空；其他 JSON Schema 类型仍按明确不支持处理。会话详情显示实际模型及完整权限/沙箱读数。退出 Happy 后可用 `codex resume <codex-thread-id>` 接回；退出原生 CLI 后，手机的 Resume Session 已恢复同一个 Happy 会话与 Codex thread，并保留前文上下文。切换前先退出当前执行端，避免两个执行器同时推进同一 thread。未启动 Happy 的原生 CLI 不会因此自动向手机同步输出。
 
-测试中实际观察到原有 PreToolUse 提问 hook 的拦截及修正问题后的正常答复，不代表全部 hooks 或审批场景均已验收。手机 Stop 后下一轮输入正常完成，用户切到蜂窝网络并确认收到 CELLULAR_OK。同一手机在 MacBook、Mac Studio、Mac mini 各选一个目录新建会话，两台远端 Mac 各完成一次原线程追问。mini 的待答表单在 App 退到后台和终止重启后仍可提交，回复保留原线程上下文。电脑运行器停止后的状态恢复、物理短断网恢复、后台通知、工具批准/拒绝及最终分发仍待验证；以上是开发验证记录，不是正式发布声明。
+测试中实际观察到原有 PreToolUse 提问 hook 的拦截及修正问题后的正常答复，不代表全部 hooks 均已验收。手机 Stop 后下一轮输入正常完成，用户切到蜂窝网络并确认收到 CELLULAR_OK。同一手机在 MacBook、Mac Studio、Mac mini 各选一个目录新建会话，两台远端 Mac 各完成原线程追问。mini 的待答表单在 App 退到后台和终止重启后仍可提交，回复保留原线程上下文。
+
+工具审批在 MacBook 的独立 on-request/read-only 测试进程中覆盖单次批准、拒绝两种结果：手机批准后命令执行，拒绝后工具返回用户取消，下一轮输入仍可完成。没有修改全局审批设置。MacBook 的终端退出和 daemon stop-session 均使手机显示非活动；手机恢复后保留原线程上下文。Studio 的会话及 daemon 停止、daemon 重启后，手机 Resume Session 同样恢复原线程。停止的会话可能在主页“显示已归档”中；daemon 离线时先在对应 Mac 启动它，或使用页面的终端恢复命令。用户还完成了手机关闭蜂窝与 Wi-Fi 约 20 秒、恢复网络后在原 Studio 会话续问的测试。后台通知及最终分发仍待验证；未测试整机重启、系统睡眠或主机断网，不能用进程重启结果外推。以上是开发验证记录，不是正式发布声明。
 
 定向回归（在 `packages/happy-cli` 下执行）：
 

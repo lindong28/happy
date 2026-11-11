@@ -90,6 +90,9 @@ public enum SessionDetails {
         }
         let flavor = metadata?["flavor"]?.stringValue
         if flavor == "codex" || flavor == "openai" || flavor == "gpt", let thread = truthy(metadata?["codexThreadId"]) {
+            if metadata?["codexNativeConfig"]?.boolValue == true {
+                return "codex resume \(thread)"
+            }
             return "happy codex --resume \(thread)"
         }
         if let claude = truthy(metadata?["claudeSessionId"]) {

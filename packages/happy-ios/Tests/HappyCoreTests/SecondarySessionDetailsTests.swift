@@ -89,6 +89,17 @@ final class SessionDetailsFormattingTests: XCTestCase {
         XCTAssertNil(SessionDetails.resumeCommand(.object(["flavor": .string("codex")])))
     }
 
+    func testNativeCodexResumeUsesLocalCLI() {
+        for native in [true, false] {
+            let metadata: JSONValue = .object([
+                "flavor": .string("codex"), "codexThreadId": .string("t1"),
+                "codexNativeConfig": .bool(native), "path": .string("/work/project"),
+            ])
+            XCTAssertEqual(SessionDetails.resumeCommand(metadata),
+                           "cd '/work/project' && " + (native ? "codex resume t1" : "happy codex --resume t1"))
+        }
+    }
+
     func testSandbox() {
         XCTAssertEqual(SessionDetails.sandbox(nil, homeDir: nil), "Disabled")
         XCTAssertEqual(SessionDetails.sandbox(.null, homeDir: nil), "Disabled")
