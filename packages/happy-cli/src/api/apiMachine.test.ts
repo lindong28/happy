@@ -125,6 +125,7 @@ describe('ApiMachineClient socket reconnection', () => {
     afterEach(() => {
         vi.useRealTimers();
         vi.restoreAllMocks();
+        vi.unstubAllEnvs();
     });
 
     it('retries after initial socket connection error', async () => {
@@ -231,6 +232,28 @@ describe('ApiMachineClient socket reconnection', () => {
         emitSocketEvent('rpc-registered', null);
         emitSocketEvent('rpc-registered', { method: 'test-machine-id:spawn-happy-session' });
         expect(client.isReady()).toBe(true);
+        client.shutdown();
+    });
+
+    it.each([
+        ['1', undefined, true],
+        ['1', false, true],
+        ['', true, false],
+    ] as const)('refreshes local configuration capability %s from stored %s', (enabled, stored, expected) => {
+        vi.useFakeTimers();
+        vi.stubEnv('HAPPY_CODEX_NATIVE_CONFIG', enabled);
+        const machine = makeMachine();
+        machine.metadata.codexNativeConfig = stored;
+        const client = new ApiMachineClient('fake-token', machine);
+        const update = vi.spyOn(client, 'updateMachineMetadata').mockImplementation(async (handler) => {
+            machine.metadata = handler(machine.metadata);
+        });
+        client.connect();
+        emitSocketEvent('connect');
+        expect(machine.metadata.codexNativeConfig).toBe(expected);
+        update.mockClear();
+        vi.advanceTimersByTime(20000);
+        expect(update).not.toHaveBeenCalled();
         client.shutdown();
     });
 

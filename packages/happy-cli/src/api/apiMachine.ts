@@ -619,13 +619,16 @@ export class ApiMachineClient {
         // metadata update so fields owned by the app (for example displayName)
         // are preserved.
         const cliVersionChanged = this.machine.metadata?.happyCliVersion !== configuration.currentCliVersion;
+        const codexNativeConfig = process.env.HAPPY_CODEX_NATIVE_CONFIG === '1';
+        const nativeConfigChanged = this.machine.metadata?.codexNativeConfig !== codexNativeConfig;
 
-        if (cliAvailabilityChanged || resumeSupportChanged || cliVersionChanged) {
+        if (cliAvailabilityChanged || resumeSupportChanged || cliVersionChanged || nativeConfigChanged) {
             this.lastKnownCLIAvailability = newAvailability;
             this.lastKnownResumeSupport = newResumeSupport;
             this.updateMachineMetadata((metadata) => ({
                 ...(metadata || {} as any),
                 happyCliVersion: configuration.currentCliVersion,
+                codexNativeConfig,
                 cliAvailability: newAvailability,
                 resumeSupport: { ...newResumeSupport, rpcAvailable: !!this.resumeSessionHandler },
             })).catch((err) => {
