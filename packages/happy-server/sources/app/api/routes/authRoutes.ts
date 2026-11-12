@@ -6,6 +6,13 @@ import { auth } from "@/app/auth/auth";
 import { log } from "@/utils/log";
 
 export function authRoutes(app: Fastify) {
+    // Optional private-instance admission. An explicit empty/malformed setting
+    // must never silently reopen registration. Existing tokens are not revoked.
+    const configuredKeys = process.env.HAPPY_ALLOWED_PUBLIC_KEYS;
+    const allowedKeys = configuredKeys === undefined ? null : new Set(configuredKeys.split(',').map(key => key.trim().toLowerCase()));
+    if (allowedKeys && [...allowedKeys].some(key => !/^[0-9a-f]{64}$/.test(key))) {
+        throw new Error('HAPPY_ALLOWED_PUBLIC_KEYS must contain comma-separated Ed25519 public keys (64 hex characters each)');
+    }
     app.post('/v1/auth', {
         schema: {
             body: z.object({
@@ -26,6 +33,9 @@ export function authRoutes(app: Fastify) {
 
         // Create or update user in database
         const publicKeyHex = privacyKit.encodeHex(publicKey);
+        if (allowedKeys && !allowedKeys.has(publicKeyHex.toLowerCase())) {
+            return reply.code(403).send({ error: 'Account not allowed on this server' });
+        }
         const user = await db.account.upsert({
             where: { publicKey: publicKeyHex },
             update: { updatedAt: new Date() },

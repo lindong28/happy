@@ -41,6 +41,9 @@ const args = [
   'node',
   '--format',
   'esm',
+  // Server deployment chooses NODE_ENV at runtime. Bun otherwise substitutes
+  // its build-time default, enabling debug/request logs in production.
+  '--env=disable',
   '--outfile',
   path.join(dist, 'standalone.mjs'),
 ];

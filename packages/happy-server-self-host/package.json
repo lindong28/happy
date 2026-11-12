@@ -26,6 +26,7 @@
     "dist",
     "prisma",
     "scripts/postinstall.cjs",
+    "scripts/macos-service.py",
     "package.json",
     "README.md"
   ],
