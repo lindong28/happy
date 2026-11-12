@@ -50,6 +50,8 @@ import type {
 import type { SandboxConfig } from '@/persistence';
 import { initializeSandbox, wrapForMcpTransport } from '@/sandbox/manager';
 import packageJson from '../../package.json';
+import WebSocket from 'ws';
+import { connectNativeSocket } from './nativeMobileTransport';
 import type { NativeQuestion, NativeQuestionResponse } from './userQuestions';
 import type { NativeConfigReadout } from './nativeConfigMetadata';
 import type { McpFormRequest } from './mcpElicitation';
@@ -90,7 +92,7 @@ export type ApprovalHandler = (params: {
     input?: unknown;
     serverName?: string;
     message?: string;
-}) => Promise<ReviewDecision>;
+}, signal: AbortSignal) => Promise<ReviewDecision>;
 
 function stringOrNull(value: unknown): string | null {
     return typeof value === 'string' && value.length > 0 ? value : null;
@@ -229,6 +231,7 @@ function normalizeRawFileChangeList(changes: unknown): LegacyPatchChanges | unde
 
 export class CodexAppServerClient {
     private process: ChildProcess | null = null;
+    private socket: WebSocket | null = null;
     private readline: ReadlineInterface | null = null;
     private nextId = 1;
     private pending = new Map<number, PendingRequest>();
@@ -261,6 +264,7 @@ export class CodexAppServerClient {
     // Tracks in-flight interruptTurn() RPCs so sendTurnAndWait can wait for them
     // before starting a new turn (prevents stale turn/interrupt from aborting the next turn).
     private pendingInterrupt: Promise<void> | null = null;
+    private nativeEarlyCompletions = new Map<string, boolean>();
     private notificationProtocol: 'unknown' | 'legacy' | 'raw' = 'unknown';
     private completedTurnIds = new Set<string>();
     private rawFileChangesByItemId = new Map<string, LegacyPatchChanges>();
@@ -277,9 +281,9 @@ export class CodexAppServerClient {
     private approvalHandler: ApprovalHandler | null = null;
     private questionHandler: ((request: QuestionRequest, signal: AbortSignal) => Promise<NativeQuestionResponse>) | null = null;
     private mcpElicitationHandler: ((request: McpFormRequest, signal: AbortSignal) => Promise<McpServerElicitationRequestResponse>) | null = null;
-    private pendingQuestionRequests = new Map<string, AbortController>();
+    private pendingServerRequests = new Map<string, AbortController>();
 
-    constructor(sandboxConfig?: SandboxConfig) {
+    constructor(sandboxConfig?: SandboxConfig, private readonly nativeSocketPath?: string) {
         this.sandboxConfig = sandboxConfig;
     }
 
@@ -365,7 +369,7 @@ export class CodexAppServerClient {
         const aborted = status === 'cancelled' || status === 'canceled' || status === 'aborted' || status === 'interrupted';
 
         this.tryResolvePendingTurn(aborted, turnId, source);
-        this._turnId = null;
+        if (!this.nativeSocketPath || !turnId || this._turnId === turnId) this._turnId = null;
 
         if (turnId && this.completedTurnIds.has(turnId)) {
             return;
@@ -421,10 +425,8 @@ export class CodexAppServerClient {
         }
 
         if (method === 'thread/status/changed') {
-            const statusType = params?.status?.type;
-            if (statusType === 'idle' && this.pendingTurnCompletion) {
-                this.emitRawTurnCompletion(this._turnId, 'completed', null, method);
-            }
+            // Idle precedes turn/completed even for interrupted turns. It is
+            // thread activity, not an authoritative successful turn result.
             return true;
         }
 
@@ -465,6 +467,11 @@ export class CodexAppServerClient {
         const item = params?.item;
         if (!item || typeof item !== 'object') {
             return method.startsWith('item/');
+        }
+
+        if (method === 'item/completed' && item.type === 'userMessage') {
+            this.eventHandler?.({ type: 'native_user_message', threadId: params.threadId, turnId: params.turnId, item });
+            return true;
         }
 
         if (method === 'item/started' && item.type === 'commandExecution') {
@@ -646,7 +653,7 @@ export class CodexAppServerClient {
         }
 
         let command = process.env.HAPPY_CODEX_PATH || 'codex';
-        let args = ['app-server', '--listen', 'stdio://'];
+        let args = ['app-server', '--listen', this.nativeSocketPath ? `unix://${this.nativeSocketPath}` : 'stdio://'];
         this.sandboxEnabled = false;
 
         if (this.sandboxConfig?.enabled && process.platform !== 'win32') {
@@ -704,6 +711,7 @@ export class CodexAppServerClient {
             }
             this.connected = false;
             this.updateResolvedConfiguration(undefined);
+            this.cancelServerRequests();
             this.eventHandler?.({ type: 'backend_disconnected' });
             // Reject all pending requests
             for (const [id, req] of this.pending) {
@@ -723,11 +731,26 @@ export class CodexAppServerClient {
         });
 
         // Parse newline-delimited JSON from stdout
-        this.readline = createInterface({ input: proc.stdout! });
-        this.readline.on('line', (line) => {
-            if (this.process !== proc || this.processEpoch !== epoch) return;
-            this.handleLine(line, epoch);
-        });
+        if (this.nativeSocketPath) {
+            proc.stdout?.resume();
+            this.socket = await connectNativeSocket(this.nativeSocketPath, () => proc.exitCode !== null || proc.signalCode !== null);
+            this.socket.on('message', data => this.handleLine(data.toString(), epoch));
+            this.socket.on('close', () => {
+                if (this.processEpoch !== epoch) return;
+                this.connected = false;
+                this.cancelServerRequests();
+                for (const request of this.pending.values()) request.reject(new Error('Codex socket disconnected'));
+                this.pending.clear();
+                this.resolvePendingTurn(true);
+                this.eventHandler?.({ type: 'backend_disconnected' });
+            });
+        } else {
+            this.readline = createInterface({ input: proc.stdout! });
+            this.readline.on('line', (line) => {
+                if (this.process !== proc || this.processEpoch !== epoch) return;
+                this.handleLine(line, epoch);
+            });
+        }
 
         // Perform initialize handshake
         const initParams: InitializeParams = {
@@ -746,8 +769,14 @@ export class CodexAppServerClient {
         logger.debug('[CodexAppServer] Connected and initialized');
     }
 
+    private cancelServerRequests(): void {
+        for (const controller of this.pendingServerRequests.values()) controller.abort();
+        this.pendingServerRequests.clear();
+    }
+
     private async disconnectInternal(opts?: { preserveThreadState?: boolean }): Promise<void> {
         this.updateResolvedConfiguration(undefined);
+        this.cancelServerRequests();
         if (!this.connected && !this.process) return;
         this.eventHandler?.({ type: 'backend_disconnected' });
 
@@ -758,6 +787,8 @@ export class CodexAppServerClient {
 
         this.readline?.close();
         this.readline = null;
+        this.socket?.close();
+        this.socket = null;
 
         try {
             proc?.stdin?.end();
@@ -1007,6 +1038,7 @@ export class CodexAppServerClient {
     }
 
     async reconnectAndResumeThread(): Promise<boolean> {
+        if (this.nativeSocketPath) throw new Error('Native mobile backend disconnected. Stop this session and resume it from a new terminal.');
         const threadId = this._threadId;
         await this.disconnectInternal({ preserveThreadState: !!threadId });
         await this.connect();
@@ -1043,6 +1075,9 @@ export class CodexAppServerClient {
 
     private markPendingTurnStarted(turnId?: string | null): void {
         if (!this.pendingTurnCompletion) return;
+        // Another client can start a turn while our turn/start is still pending.
+        // The RPC response, not a broadcast, identifies the turn we joined.
+        if (this.nativeSocketPath) return;
         if (turnId) {
             this.pendingTurnCompletion.turnId = turnId;
         }
@@ -1051,6 +1086,10 @@ export class CodexAppServerClient {
     private tryResolvePendingTurn(aborted: boolean, turnId: string | null, source: string): void {
         const pending = this.pendingTurnCompletion;
         if (!pending) return;
+        if (this.nativeSocketPath && !pending.turnId && turnId) {
+            this.nativeEarlyCompletions.set(turnId, aborted);
+            return;
+        }
 
         // Guard against stale completion notifications from a *different* turn.
         // We use turn ID matching instead of the `started` flag because Codex
@@ -1089,7 +1128,7 @@ export class CodexAppServerClient {
         gracePeriodMs?: number;
         forceRestartOnTimeout?: boolean;
     }): Promise<{ hadActiveTurn: boolean; aborted: boolean; forcedRestart: boolean; resumedThread: boolean }> {
-        const hadActiveTurn = this.hasPendingTurnCompletion();
+        const hadActiveTurn = this.hasPendingTurnCompletion() || (Boolean(this.nativeSocketPath) && this._turnId !== null);
 
         // No active turn pending in this client call-site.
         if (!hadActiveTurn) {
@@ -1108,7 +1147,7 @@ export class CodexAppServerClient {
             return { hadActiveTurn: true, aborted: true, forcedRestart: false, resumedThread: false };
         }
 
-        const shouldForceRestart = opts?.forceRestartOnTimeout ?? true;
+        const shouldForceRestart = !this.nativeSocketPath && (opts?.forceRestartOnTimeout ?? true);
         if (!shouldForceRestart) {
             return { hadActiveTurn: true, aborted: false, forcedRestart: false, resumedThread: false };
         }
@@ -1132,6 +1171,7 @@ export class CodexAppServerClient {
      * Returns when task_complete or turn_aborted is received.
      */
     async sendTurn(prompt: string, opts?: {
+        clientUserMessageId?: string;
         model?: string;
         cwd?: string;
         approvalPolicy?: ApprovalPolicy;
@@ -1155,6 +1195,7 @@ export class CodexAppServerClient {
             threadId: this._threadId,
             input,
         };
+        if (opts?.clientUserMessageId) params.clientUserMessageId = opts.clientUserMessageId;
         if (opts?.cwd) params.cwd = opts.cwd;
         if (opts?.approvalPolicy) params.approvalPolicy = opts.approvalPolicy;
         if (opts?.model) params.model = opts.model;
@@ -1181,10 +1222,13 @@ export class CodexAppServerClient {
         const result = await this.request('turn/start', params) as { turn?: { id?: string | null } };
         const turnId = result?.turn?.id;
         if (typeof turnId === 'string' && turnId.length > 0) {
-            this._turnId = turnId;
+            if (!this.nativeEarlyCompletions.has(turnId)) this._turnId = turnId;
             if (this.pendingTurnCompletion) {
                 this.pendingTurnCompletion.turnId = turnId;
+                const early = this.nativeEarlyCompletions.get(turnId);
+                if (early !== undefined) this.resolvePendingTurn(early);
             }
+            this.nativeEarlyCompletions.clear();
         }
     }
 
@@ -1193,6 +1237,7 @@ export class CodexAppServerClient {
      * Returns { aborted: true } if the turn was aborted (user cancel, permission reject, etc.).
      */
     async sendTurnAndWait(prompt: string, opts?: {
+        clientUserMessageId?: string;
         model?: string;
         cwd?: string;
         approvalPolicy?: ApprovalPolicy;
@@ -1213,6 +1258,7 @@ export class CodexAppServerClient {
         }
 
         const completion = new Promise<boolean>((resolve) => {
+            this.nativeEarlyCompletions.clear();
             this.pendingTurnCompletion = {
                 resolve,
                 turnId: null,
@@ -1286,13 +1332,33 @@ export class CodexAppServerClient {
 
     // ─── JSON-RPC transport ─────────────────────────────────────
 
+    async nativeBackendPid(): Promise<number> {
+        const result = await this.request('server/diagnostics', {}) as { process: { id: number } };
+        if (!Number.isSafeInteger(result.process.id) || result.process.id < 1) throw new Error('Invalid Codex backend identity');
+        return result.process.id;
+    }
+
+    async materializeNativeThread(): Promise<void> {
+        if (!this._threadId) throw new Error('No native thread');
+        await this.request('thread/name/set', { threadId: this._threadId, name: 'Codex mobile' });
+    }
+
+    private transportWritable(): boolean {
+        return this.nativeSocketPath ? this.socket?.readyState === WebSocket.OPEN : Boolean(this.process?.stdin?.writable);
+    }
+
+    private writeTransport(line: string): void {
+        if (this.nativeSocketPath) this.socket!.send(line.trimEnd());
+        else this.process!.stdin!.write(line);
+    }
+
     /** Default timeout for RPC requests (ms). */
     private static readonly REQUEST_TIMEOUT_MS = 30_000;
 
     private request(method: string, params?: unknown, timeoutMs?: number): Promise<unknown> {
         const timeout = timeoutMs ?? CodexAppServerClient.REQUEST_TIMEOUT_MS;
         return new Promise((resolve, reject) => {
-            if (!this.process?.stdin?.writable) {
+            if (!this.transportWritable()) {
                 reject(new Error(`Cannot send ${method}: stdin not writable`));
                 return;
             }
@@ -1313,21 +1379,21 @@ export class CodexAppServerClient {
             const msg: JsonRpcRequest = { jsonrpc: '2.0', id, method, params };
             const line = JSON.stringify(msg) + '\n';
             logger.debug(`[CodexAppServer] → ${method} (id=${id})`);
-            this.process.stdin.write(line);
+            this.writeTransport(line);
         });
     }
 
     private notify(method: string, params?: unknown): void {
-        if (!this.process?.stdin?.writable) return;
+        if (!this.transportWritable()) return;
         const msg: JsonRpcRequest = { jsonrpc: '2.0', method, params };
-        this.process.stdin.write(JSON.stringify(msg) + '\n');
+        this.writeTransport(JSON.stringify(msg) + '\n');
         logger.debug(`[CodexAppServer] → ${method} (notification)`);
     }
 
     private respond(id: number, result: unknown): void {
-        if (!this.process?.stdin?.writable) return;
+        if (!this.transportWritable()) return;
         const msg: JsonRpcResponse = { jsonrpc: '2.0', id, result };
-        this.process.stdin.write(JSON.stringify(msg) + '\n');
+        this.writeTransport(JSON.stringify(msg) + '\n');
         logger.debug(`[CodexAppServer] → response (id=${id})`);
     }
 
@@ -1457,6 +1523,22 @@ export class CodexAppServerClient {
     }
 
     private async handleServerRequest(id: number, method: string, params: any): Promise<void> {
+        const epoch = this.processEpoch;
+        const key = JSON.stringify([params?.threadId ?? params?.conversationId ?? this._threadId, id]);
+        const controller = new AbortController();
+        this.pendingServerRequests.set(key, controller);
+        try {
+            await this.dispatchServerRequest(id, method, params, controller.signal, epoch);
+        } finally {
+            if (this.pendingServerRequests.get(key) === controller) this.pendingServerRequests.delete(key);
+        }
+    }
+
+    private async dispatchServerRequest(id: number, method: string, params: any, signal: AbortSignal, epoch: number): Promise<void> {
+        // Another attached client may resolve this request while our UI is open.
+        const respond = (result: unknown): void => {
+            if (!signal.aborted && epoch === this.processEpoch) this.respond(id, result);
+        };
         const isMcpToolApproval = method === 'mcpServer/elicitation/request'
             && params?._meta?.codex_approval_kind === 'mcp_tool_call'
             && params?.mode === 'form'
@@ -1464,29 +1546,23 @@ export class CodexAppServerClient {
             && params?.requestedSchema?.properties
             && Object.keys(params.requestedSchema.properties).length === 0;
         if (method === 'item/tool/requestUserInput' || (method === 'mcpServer/elicitation/request' && !isMcpToolApproval)) {
-            const epoch = this.processEpoch;
-            const key = JSON.stringify([params.threadId, id]);
-            const controller = new AbortController();
-            this.pendingQuestionRequests.set(key, controller);
             try {
                 let response: NativeQuestionResponse | McpServerElicitationRequestResponse;
                 if (method === 'item/tool/requestUserInput') {
                     if (!this.questionHandler) throw new Error('No question handler registered');
-                    response = await this.questionHandler({ ...params, requestId: id }, controller.signal);
+                    response = await this.questionHandler({ ...params, requestId: id }, signal);
                 } else {
                     if (!this.mcpElicitationHandler) throw new Error('No MCP elicitation handler registered');
-                    response = await this.mcpElicitationHandler(params, controller.signal);
+                    response = await this.mcpElicitationHandler(params, signal);
                 }
-                if (!controller.signal.aborted && epoch === this.processEpoch) this.respond(id, response);
+                respond(response);
             } catch (error) {
                 logger.warn('[CodexAppServer] User input request could not be answered', { requestId: id });
-                if (!controller.signal.aborted && epoch === this.processEpoch && this.process?.stdin?.writable) {
-                    this.process.stdin.write(JSON.stringify({ jsonrpc: '2.0', id, error: {
+                if (!signal.aborted && epoch === this.processEpoch && this.transportWritable()) {
+                    this.writeTransport(JSON.stringify({ jsonrpc: '2.0', id, error: {
                         code: -32603, message: error instanceof Error ? error.message : 'User input unavailable',
                     } }) + '\n');
                 }
-            } finally {
-                if (this.pendingQuestionRequests.get(key) === controller) this.pendingQuestionRequests.delete(key);
             }
             return;
         }
@@ -1507,8 +1583,8 @@ export class CodexAppServerClient {
                 input: params?._meta?.tool_params ?? {},
                 serverName,
                 message: params?.message,
-            });
-            this.respond(id, this.mapDecisionToMcpElicitationResponse(decision, params));
+            }, signal);
+            respond(this.mapDecisionToMcpElicitationResponse(decision, params));
             return;
         }
 
@@ -1541,8 +1617,8 @@ export class CodexAppServerClient {
                         : params.command != null ? [params.command] : [],
                     cwd: params.cwd,
                     reason: params.reason,
-                });
-                this.respond(id, { decision: this.mapDecisionToWire(decision, legacy) });
+                }, signal);
+                respond({ decision: this.mapDecisionToWire(decision, legacy) });
             } finally {
                 this.pendingApprovalCallIds.delete(callId);
             }
@@ -1569,8 +1645,8 @@ export class CodexAppServerClient {
                         ? this.rawFileChangesByItemId.get(itemKey) ?? this.rawFileChangesByItemId.get(itemId)
                         : undefined),
                     reason: params.reason,
-                });
-                this.respond(id, { decision: this.mapDecisionToWire(decision, legacy) });
+                }, signal);
+                respond({ decision: this.mapDecisionToWire(decision, legacy) });
             } finally {
                 this.pendingApprovalCallIds.delete(callId);
             }
@@ -1579,7 +1655,7 @@ export class CodexAppServerClient {
 
         // Unknown server request — respond so server doesn't hang
         logger.debug(`[CodexAppServer] Unknown server request: ${method}`);
-        this.respond(id, {});
+        respond({});
     }
 
     // The bare scoped key keeps the app's permission ↔ tool-call join for the
@@ -1593,10 +1669,10 @@ export class CodexAppServerClient {
             : baseCallId;
     }
 
-    private async handleApproval(params: Parameters<ApprovalHandler>[0]): Promise<ReviewDecision> {
+    private async handleApproval(params: Parameters<ApprovalHandler>[0], signal: AbortSignal): Promise<ReviewDecision> {
         if (this.approvalHandler) {
             try {
-                return await this.approvalHandler(params);
+                return await this.approvalHandler(params, signal);
             } catch (err) {
                 logger.debug('[CodexAppServer] Approval handler error:', err);
                 return 'denied';
@@ -1606,8 +1682,18 @@ export class CodexAppServerClient {
     }
 
     private handleNotification(method: string, params: any): void {
+        if (this.nativeSocketPath && this._threadId && params?.threadId && params.threadId !== this._threadId
+            && (method.startsWith('turn/') || method === 'thread/status/changed')) return;
+        if (method === 'thread/settings/updated' && params?.threadId === this._threadId) {
+            const settings = params.threadSettings;
+            if (settings && typeof settings.model === 'string') this.updateResolvedConfiguration({
+                model: settings.model, reasoningEffort: settings.effort ?? null,
+                approvalPolicy: settings.approvalPolicy, sandbox: settings.sandboxPolicy,
+            });
+            return;
+        }
         if (method === 'serverRequest/resolved') {
-            this.pendingQuestionRequests.get(JSON.stringify([params.threadId, params.requestId]))?.abort();
+            this.pendingServerRequests.get(JSON.stringify([params.threadId, params.requestId]))?.abort();
             return;
         }
         // codex/event notifications: either `codex/event` or `codex/event/<type>`

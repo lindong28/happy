@@ -4,7 +4,9 @@ import React from "react";
 import { createEnvelope } from '@slopus/happy-wire';
 import { ApiClient } from '@/api/api';
 import { CodexAppServerClient, CodexRequestRejected } from './codexAppServerClient';
-import type { ReasoningEffort } from './codexAppServerTypes';
+import type { ReasoningEffort, ThreadItem } from './codexAppServerTypes';
+import { acquireNativeLease, publishNativeMobileReady } from './nativeMobile';
+import type { ChildProcess } from 'node:child_process';
 import { CodexPermissionHandler } from './utils/permissionHandler';
 import { ReasoningProcessor } from './utils/reasoningProcessor';
 import { DiffProcessor } from './utils/diffProcessor';
@@ -101,6 +103,7 @@ export async function runCodex(opts: {
     startedBy?: 'daemon' | 'terminal';
     noSandbox?: boolean;
     nativeConfig?: boolean;
+    nativeMobileDirectory?: string;
     resumeThreadId?: string;
     permissionMode?: PermissionMode;
     model?: string;
@@ -325,6 +328,10 @@ export async function runCodex(opts: {
     };
 
     const handleUserMessage = createSerialAsyncHandler<UserMessage>(async (message) => {
+        if (opts.nativeMobileDirectory && isCodexClearText(message.content.text)) {
+            session.sendSessionEvent({ type: 'message', message: 'This terminal and phone stay on one Codex session. Open a new codex-account terminal to start another session.' });
+            return;
+        }
         if (isCodexClearText(message.content.text)) cancelQuestions();
         const attachmentsForThisMessage = await session.drainAttachmentsForUserMessage();
 
@@ -571,7 +578,7 @@ export async function runCodex(opts: {
     //
 
     const messageBuffer = new MessageBuffer();
-    const hasTTY = process.stdout.isTTY && process.stdin.isTTY;
+    const hasTTY = !opts.nativeMobileDirectory && process.stdout.isTTY && process.stdin.isTTY;
     let inkInstance: any = null;
 
     if (hasTTY) {
@@ -606,7 +613,20 @@ export async function runCodex(opts: {
     // Start Context 
     //
 
-    client = new CodexAppServerClient(sandboxConfig);
+    client = new CodexAppServerClient(sandboxConfig, opts.nativeMobileDirectory ? join(opts.nativeMobileDirectory, 'b.sock') : undefined);
+    let nativeLease: ChildProcess | undefined;
+    let closeNativeFrontend: (() => Promise<void>) | undefined;
+    const mobileUserMessageIds = new Set<string>();
+    const nativeUserItems = new Set<string>();
+    const forwardNativeUser = createSerialAsyncHandler<ThreadItem>(async item => {
+        const envelopes = await buildCodexThreadBackfillEnvelopes({
+            thread: { turns: [{ id: currentTurnId ?? '', items: [item], status: 'inProgress' }] },
+            uploadLocalImage: (attachment, imageOpts) => session.uploadLocalImageAttachmentEnvelope(attachment, imageOpts),
+        });
+        for (const envelope of envelopes) {
+            if (envelope.role === 'user') session.sendSessionProtocolMessage(envelope);
+        }
+    }, error => logger.warn('[Codex] Could not forward native input', { errorName: error instanceof Error ? error.name : typeof error }));
 
     permissionHandler = new CodexPermissionHandler(session, !opts.nativeConfig);
     // Drop any permission requests left in agent state from a previous CLI
@@ -719,7 +739,7 @@ export async function runCodex(opts: {
         }
     });
 
-    client.setApprovalHandler(async (params) => {
+    client.setApprovalHandler(async (params, signal) => {
         const toolName = params.type === 'exec'
             ? 'CodexBash'
             : params.type === 'patch'
@@ -749,7 +769,7 @@ export async function runCodex(opts: {
         }
 
         try {
-            const result = await permissionHandler.handleToolCall(params.callId, toolName, input);
+            const result = await permissionHandler.handleToolCall(params.callId, toolName, input, signal);
             logger.debug('[Codex] Permission result:', result.decision);
             return result.decision;
         } catch (error) {
@@ -762,6 +782,16 @@ export async function runCodex(opts: {
     client.setEventHandler((msg) => {
         if (msg.type === 'backend_disconnected') {
             cancelQuestions();
+            if (opts.nativeMobileDirectory && !shouldExit) void terminateSession();
+            return;
+        }
+        if (msg.type === 'native_user_message') {
+            if (!opts.nativeMobileDirectory || msg.threadId !== client.threadId) return;
+            const item = msg.item as ThreadItem & { clientId?: string };
+            if (nativeUserItems.has(item.id)) return;
+            nativeUserItems.add(item.id);
+            if (item.clientId && mobileUserMessageIds.delete(item.clientId)) return;
+            forwardNativeUser(item);
             return;
         }
         if (msg.type === 'user_questions') {
@@ -947,6 +977,12 @@ export async function runCodex(opts: {
         await client.connect();
         logger.debug('[codex]: client.connect done');
 
+        let backendPid: number | undefined;
+        if (opts.nativeMobileDirectory) {
+            backendPid = await client.nativeBackendPid();
+            if (opts.resumeThreadId) nativeLease = await acquireNativeLease(opts.resumeThreadId, backendPid, () => { if (!shouldExit) void terminateSession(); });
+        }
+
         if (opts.resumeThreadId) {
             await resumeExistingThread({
                 client,
@@ -960,6 +996,22 @@ export async function runCodex(opts: {
             });
             first = false;
             appendSystemPromptInjected = true;
+        }
+
+        if (opts.nativeMobileDirectory) {
+            if (!opts.resumeThreadId) {
+                const started = await client.startThread({ cwd: process.cwd(), mcpServers });
+                nativeLease = await acquireNativeLease(started.threadId, backendPid!, () => { if (!shouldExit) void terminateSession(); });
+                await client.materializeNativeThread();
+                session.updateMetadata(current => ({ ...current, codexThreadId: started.threadId }));
+            } else {
+                const { thread } = await client.readThread({ threadId: opts.resumeThreadId, includeTurns: true });
+                for (const turn of thread.turns ?? []) for (const item of turn.items ?? []) if (item.type === 'userMessage') nativeUserItems.add(item.id);
+                const envelopes = await buildCodexThreadBackfillEnvelopes({ thread, uploadLocalImage: (attachment, imageOpts) => session.uploadLocalImageAttachmentEnvelope(attachment, imageOpts) });
+                for (const envelope of envelopes) session.sendSessionProtocolMessage(envelope);
+            }
+            first = false;
+            closeNativeFrontend = await publishNativeMobileReady(opts.nativeMobileDirectory, client.threadId!, backendPid!);
         }
 
         const forkCodexThreadId = process.env.HAPPY_FORK_CODEX_THREAD_ID;
@@ -1128,7 +1180,10 @@ export async function runCodex(opts: {
 
                 // A signal may have arrived while thread/image preparation awaited I/O.
                 if (shouldExit) break;
+                const clientUserMessageId = opts.nativeMobileDirectory ? randomUUID() : undefined;
+                if (clientUserMessageId) mobileUserMessageIds.add(clientUserMessageId);
                 const result = await client.sendTurnAndWait(turnPrompt, {
+                    clientUserMessageId,
                     model: message.mode.model,
                     approvalPolicy: executionPolicy.approvalPolicy,
                     sandbox: executionPolicy.sandbox,
@@ -1182,6 +1237,7 @@ export async function runCodex(opts: {
         // Clean up resources when main loop exits
         clearInterval(keepAliveInterval);
         cancelQuestions();
+        await closeNativeFrontend?.();
         await terminationPromise;
         logger.debug('[codex]: Final cleanup start');
         logActiveHandles('cleanup-start');
@@ -1210,6 +1266,7 @@ export async function runCodex(opts: {
         }
         logger.debug('[codex]: client.disconnect begin');
         await client.disconnect();
+        nativeLease?.stdin?.end();
         logger.debug('[codex]: client.disconnect done');
         // Stop Happy MCP server
         logger.debug('[codex]: happyServer.stop');

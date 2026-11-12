@@ -381,9 +381,21 @@ This mechanism allows the server and mobile clients to drive local actions witho
 - Config: `packages/happy-cli/src/configuration.ts`
 
 
-## Native Codex TUI feasibility (2026-11-12)
+## Native Codex TUI mobile integration
 
-The fork's installed Codex mobile entry still uses Happy's Ink display. An isolated experiment connected the actual Codex 0.167.0 TUI and the Happy CLI client built from fork commit `dd4e4550bf8019e9dae7dc39faee06f5f84fc611` to the same app-server/thread. This is a feasibility result, not a released native-TUI mode. The [official remote-TUI interface](https://learn.chatgpt.com/docs/app-server#connect-the-cli-terminal-ui) provides the connection primitive.
+Personal account bridge version 2 adds `codex --native-tui` for the paired `codex-account --account NAME --mobile` launcher. `nativeMobile.ts` starts a detached Happy worker or reconnects to an existing matching thread/account/directory. The worker owns the Unix app-server, relay connection and separate UUID lease helper; the foreground runs the real Codex remote TUI. Normal TUI exit leaves the worker alive. Happy session stop ends the backend and releases the lease after its process identity exits. The helper covers worker death while the helper remains alive; abrupt helper death is not an atomic process-and-lock guarantee.
+
+Each terminal stays on one thread. `nativeMobileTransport.ts` rejects thread creation, forks and foreign-thread mutation before forwarding, and preserves WebSocket frame types. Read-only discovery remains available. Phone `/clear` is rejected before changing pending questions or queues. Open another account terminal to select another thread.
+
+Sockets live in private, user-owned directories under `HAPPY_HOME_DIR/native`. This mode requires the paired account entry and Codex Unix app-server/remote-TUI support; ordinary Happy Codex mode remains available. Startup failures point to that session's worker log. Ready files describe active workers, not phone connectivity. Model credentials stay with the local account launcher.
+
+`CodexAppServerClient` forwards native user messages, associates completions with turn IDs, and consumes authoritative completion status rather than inferring success from idle. Peer resolution aborts outstanding approval/question waits. Happy-origin message IDs prevent duplicate relay echoes. Empty threads are materialized with `thread/name/set` before first attachment.
+
+Development checks on macOS with Codex 0.167.0 exercised real-account startup, cold resume, normal detach/reattach, fixed-thread rejection and terminal resizing. The iPhone displayed a native-origin input and reply. Phone-origin submission, the installed command and fleet acceptance remain separate checks; protocol tests do not establish them. Installation and current acceptance are maintained in `system-config/happy-personal/README.md`.
+
+## Native Codex TUI feasibility (2026-11-12, historical baseline)
+
+At the time of this experiment, the installed mobile entry used Happy's Ink display. An isolated experiment connected the actual Codex 0.167.0 TUI and the Happy CLI client built from fork commit `dd4e4550bf8019e9dae7dc39faee06f5f84fc611` to the same app-server/thread. This is historical feasibility evidence. The [official remote-TUI interface](https://learn.chatgpt.com/docs/app-server#connect-the-cli-terminal-ui) provides the connection primitive.
 
 The experiment ran on one macOS host with an isolated `HOME`/`CODEX_HOME`, a localhost Responses API fixture, and an OS sandbox denying non-local outbound connections. The real Happy `CodexAppServerClient` used a disposable stdio-to-WebSocket adapter. Its question and approval handlers were test consumers; the full Happy runner, relay, real model account, and iPhone app were not part of this experiment. Do not treat its outputs as phone acceptance or as a configuration-preservation check.
 

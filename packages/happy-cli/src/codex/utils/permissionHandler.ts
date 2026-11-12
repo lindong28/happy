@@ -75,8 +75,10 @@ export class CodexPermissionHandler extends BasePermissionHandler {
     async handleToolCall(
         toolCallId: string,
         toolName: string,
-        input: unknown
+        input: unknown,
+        signal?: AbortSignal
     ): Promise<PermissionResult> {
+        if (signal?.aborted) return { decision: 'abort' };
         if (this.autoApproveTitles && this.shouldAutoApprove(toolName, toolCallId)) {
             logger.debug(`${this.getLogPrefix()} Auto-approving tool ${toolName} (${toolCallId})`);
 
@@ -98,7 +100,23 @@ export class CodexPermissionHandler extends BasePermissionHandler {
             return { decision: 'approved' };
         }
 
-        return new Promise<PermissionResult>((resolve, reject) => {
+        const cancel = (): void => {
+            const pending = this.pendingRequests.get(toolCallId);
+            if (!pending) return;
+            this.pendingRequests.delete(toolCallId);
+            pending.resolve({ decision: 'abort' });
+            this.session.updateAgentState(current => {
+                const requests = { ...current.requests };
+                const request = requests[toolCallId];
+                if (!request) return current;
+                delete requests[toolCallId];
+                return { ...current, requests, completedRequests: {
+                    ...current.completedRequests,
+                    [toolCallId]: { ...request, completedAt: Date.now(), status: 'canceled', reason: 'Resolved or closed by Codex' },
+                } };
+            });
+        };
+        const waiting = new Promise<PermissionResult>((resolve, reject) => {
             // Store the pending request
             this.pendingRequests.set(toolCallId, {
                 resolve,
@@ -110,7 +128,14 @@ export class CodexPermissionHandler extends BasePermissionHandler {
             // Update agent state with pending request
             this.addPendingRequestToState(toolCallId, toolName, input);
 
+            signal?.addEventListener('abort', cancel, { once: true });
+            if (signal?.aborted) cancel();
             logger.debug(`${this.getLogPrefix()} Permission request sent for tool: ${toolName} (${toolCallId})`);
         });
+        try {
+            return await waiting;
+        } finally {
+            signal?.removeEventListener('abort', cancel);
+        }
     }
 }

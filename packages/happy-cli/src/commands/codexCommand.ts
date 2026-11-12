@@ -5,6 +5,7 @@ import { extractNoSandboxFlag } from '@/utils/sandboxFlags'
 import { ensureDaemonRunning } from '@/daemon/ensureDaemonRunning'
 import type { PermissionMode } from '@/api/types'
 import type { ReasoningEffort } from '@/codex/codexAppServerTypes'
+import { launchNativeMobile, validateNativeMobileDirectory } from '@/codex/nativeMobile'
 
 export async function handleCodexCommand(args: string[]): Promise<void> {
   let startedBy: 'daemon' | 'terminal' | undefined = undefined
@@ -14,6 +15,16 @@ export async function handleCodexCommand(args: string[]): Promise<void> {
   const nativeArgs = extractCodexNativeConfigFlag(args)
   const sandboxArgs = extractNoSandboxFlag(nativeArgs.args)
   const codexArgs = extractCodexResumeFlag(sandboxArgs.args)
+  if (args.includes('--native-tui')) {
+    await launchNativeMobile(args, codexArgs.resumeThreadId ?? undefined)
+    return
+  }
+  const workerIndex = args.indexOf('--native-worker')
+  const nativeMobileDirectory = workerIndex >= 0 ? args[workerIndex + 1] : undefined
+  if (workerIndex >= 0) {
+    if (!nativeMobileDirectory || nativeMobileDirectory !== process.env.HAPPY_NATIVE_MOBILE_DIR || !nativeArgs.nativeConfig) throw new Error('Invalid native mobile worker invocation')
+    await validateNativeMobileDirectory(nativeMobileDirectory)
+  }
 
   for (let i = 0; i < codexArgs.args.length; i++) {
     if (codexArgs.args[i] === '--started-by') {
@@ -36,6 +47,7 @@ export async function handleCodexCommand(args: string[]): Promise<void> {
     credentials,
     startedBy,
     nativeConfig: nativeArgs.nativeConfig,
+    nativeMobileDirectory,
     noSandbox: sandboxArgs.noSandbox,
     resumeThreadId: codexArgs.resumeThreadId ?? undefined,
     permissionMode,
