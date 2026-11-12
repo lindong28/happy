@@ -159,6 +159,7 @@ happy connect status
 | `HAPPY_HOME_DIR` | Custom home directory for Happy data (default: `~/.happy`) |
 | `HAPPY_CODEX_NATIVE_CONFIG` | Set to `1` before starting the daemon to use local configuration for newly spawned Codex sessions |
 | `HAPPY_CODEX_PATH` | Optional executable path used for Codex version checks and app-server startup; defaults to `codex` |
+| `HAPPY_CODEX_ACCOUNT_NAME` | Optional local alias for a compatible personal account adapter; saved as `codexAccountName` and explicitly restored on resume, stripped from daemon/ordinary child inheritance. Not credentials. Leave unset for ordinary installations. |
 | `HAPPY_DISABLE_CAFFEINATE` | Disable macOS sleep prevention |
 | `HAPPY_EXPERIMENTAL` | Enable experimental features |
 

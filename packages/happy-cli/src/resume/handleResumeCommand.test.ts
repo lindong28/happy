@@ -54,6 +54,31 @@ import { spawnHappyCLI } from '@/utils/spawnHappyCLI';
 
 import { buildResumeLaunch, formatResumeHelp, handleResumeCommand, parseResumeCommandArgs } from './handleResumeCommand';
 import { LocalResumeSessionError } from './localResumeStore';
+import { buildSessionChildEnvironment, sanitizeSessionEnvironment } from '@/daemon/sessionEnvironment';
+
+describe('optional Codex account routing', () => {
+    it.each(['account-a', 'account-b'])('restores %s and isolates an ordinary daemon child', async (name) => {
+        const session = createReconnectableSession();
+        Object.assign(session.metadata, { codexAccountName: name });
+        const ambient = { CODEX_HOME: '/existing/home', HAPPY_CODEX_ACCOUNT_NAME: 'unrelated' };
+        const daemon = sanitizeSessionEnvironment(ambient);
+        expect(daemon).toEqual({ CODEX_HOME: '/existing/home' });
+        const launch = buildResumeLaunch(session);
+        expect(buildSessionChildEnvironment(daemon, launch.env)).toEqual({
+            CODEX_HOME: '/existing/home', HAPPY_CODEX_ACCOUNT_NAME: name,
+        });
+        expect(buildSessionChildEnvironment(ambient)).not.toHaveProperty('HAPPY_CODEX_ACCOUNT_NAME');
+        mocks.mockResolveLocalReconnectableSession.mockResolvedValue(session);
+        await handleResumeCommand([session.id]);
+        expect(mocks.mockSpawnHappyCLI.mock.calls[0][1].env.HAPPY_CODEX_ACCOUNT_NAME).toBe(name);
+    });
+
+    it.each(['', '../other', 'session-locks', 42])('refuses invalid saved account %s', (value) => {
+        const session = createReconnectableSession();
+        Object.assign(session.metadata, { codexAccountName: value });
+        expect(() => buildResumeLaunch(session)).toThrow('Invalid Codex account name');
+    });
+});
 
 function createChildProcess(exitCode: number | null = 0) {
     const handlers = new Map<string, (...args: any[]) => void>();

@@ -1,4 +1,5 @@
 import { existsSync } from 'node:fs';
+import { codexAccountName } from '@/codex/accountBridge';
 
 import type { Metadata } from '@/api/types';
 import { encodeBase64 } from '@/api/encryption';
@@ -12,6 +13,7 @@ import { resolveHappySession, type ReconnectableHappySession, type ResumableHapp
 export type ResumeLaunch = {
     cwd: string;
     args: string[];
+    env?: NodeJS.ProcessEnv;
 };
 
 export type ResumeLaunchOptions = {
@@ -63,9 +65,11 @@ export function buildResumeLaunch(session: ResumableHappySession, options: Resum
         if (options.startedBy) {
             args.push('--started-by', options.startedBy);
         }
+        const accountName = codexAccountName(metadata.codexAccountName);
         return {
             cwd: metadata.path,
             args,
+            ...(accountName === undefined ? {} : { env: { HAPPY_CODEX_ACCOUNT_NAME: accountName } }),
         };
     }
 
@@ -121,7 +125,7 @@ function spawnResumeChild(launch: ResumeLaunch, env: NodeJS.ProcessEnv = sanitiz
     return new Promise((resolve, reject) => {
         const child = spawnHappyCLI(launch.args, {
             cwd: launch.cwd,
-            env,
+            env: { ...env, ...launch.env },
             stdio: 'inherit',
         });
 

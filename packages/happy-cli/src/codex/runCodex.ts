@@ -1,4 +1,5 @@
 import { render } from "ink";
+import { codexAccountName } from './accountBridge';
 import React from "react";
 import { createEnvelope } from '@slopus/happy-wire';
 import { ApiClient } from '@/api/api';
@@ -181,6 +182,8 @@ export async function runCodex(opts: {
     });
 
     if (opts.nativeConfig) Object.assign(metadata, nativeConfigMetadata());
+    const accountName = codexAccountName(process.env.HAPPY_CODEX_ACCOUNT_NAME);
+    if (accountName !== undefined) metadata.codexAccountName = accountName;
 
     const skillCommands = await discoverCodexSkillCommands();
     if (skillCommands.length > 0) {

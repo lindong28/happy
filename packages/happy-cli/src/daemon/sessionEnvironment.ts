@@ -16,6 +16,7 @@ export const SESSION_SCOPED_ENV_KEYS = [
     'HAPPY_FORK_CODEX_THREAD_ID',
     'HAPPY_SIDE_CHAT',
     'CODEX_THREAD_ID',
+    'HAPPY_CODEX_ACCOUNT_NAME',
 ] as const;
 
 /**

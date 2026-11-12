@@ -859,6 +859,7 @@ export async function startDaemon(): Promise<void> {
           cwd: launch.cwd,
           reconnect: { happySessionId, happySessionMetadataFromLocalWebhook: metadata, encryption },
           env: buildSessionChildEnvironment(ambientEnvironment, {
+            ...launch.env,
             HAPPY_RECONNECT_SESSION_ID: happySessionId,
             HAPPY_RECONNECT_ENCRYPTION_KEY: encodeBase64(encryption.encryptionKey),
             HAPPY_RECONNECT_ENCRYPTION_VARIANT: encryption.encryptionVariant,

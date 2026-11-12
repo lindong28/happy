@@ -320,6 +320,7 @@ export type Metadata = {
   claudeSessionId?: string, // Claude Code session ID
   codexThreadId?: string, // Codex app-server thread ID
   codexNativeConfig?: boolean, // Preserve the explicit native-config choice when resuming this session
+  codexAccountName?: string, // Optional local account alias; never authentication material
   tools?: string[],
   slashCommands?: string[],
   mcpServers?: Array<{ name: string; status: string }>,

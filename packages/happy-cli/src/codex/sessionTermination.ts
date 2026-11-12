@@ -10,8 +10,10 @@ export function registerSessionTermination(terminate: () => void, signals: Event
     };
     signals.on('SIGTERM', handler);
     signals.on('SIGINT', handler);
+    signals.on('SIGHUP', handler);
     return () => {
         signals.off('SIGTERM', handler);
         signals.off('SIGINT', handler);
+        signals.off('SIGHUP', handler);
     };
 }

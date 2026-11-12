@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { registerSessionTermination } from './sessionTermination';
 
 describe('Codex process termination', () => {
-    it.each(['SIGTERM', 'SIGINT'])('requests graceful shutdown on %s only once', (signal) => {
+    it.each(['SIGTERM', 'SIGINT', 'SIGHUP'])('requests graceful shutdown on %s only once', (signal) => {
         const signals = new EventEmitter();
         const terminate = vi.fn();
         const dispose = registerSessionTermination(terminate, signals);
@@ -22,6 +22,7 @@ describe('Codex process termination', () => {
         dispose();
         signals.emit('SIGTERM');
         signals.emit('SIGINT');
+        signals.emit('SIGHUP');
         expect(terminate).not.toHaveBeenCalled();
         expect(other).toHaveBeenCalledOnce();
     });
