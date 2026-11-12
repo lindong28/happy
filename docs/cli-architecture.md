@@ -379,3 +379,30 @@ This mechanism allows the server and mobile clients to drive local actions witho
 - API clients: `packages/happy-cli/src/api`
 - Persistence: `packages/happy-cli/src/persistence.ts`
 - Config: `packages/happy-cli/src/configuration.ts`
+
+
+## Native Codex TUI feasibility (2026-11-12)
+
+The fork's installed Codex mobile entry still uses Happy's Ink display. An isolated experiment connected the actual Codex 0.167.0 TUI and the Happy CLI client built from fork commit `dd4e4550bf8019e9dae7dc39faee06f5f84fc611` to the same app-server/thread. This is a feasibility result, not a released native-TUI mode. The [official remote-TUI interface](https://learn.chatgpt.com/docs/app-server#connect-the-cli-terminal-ui) provides the connection primitive.
+
+The experiment ran on one macOS host with an isolated `HOME`/`CODEX_HOME`, a localhost Responses API fixture, and an OS sandbox denying non-local outbound connections. The real Happy `CodexAppServerClient` used a disposable stdio-to-WebSocket adapter. Its question and approval handlers were test consumers; the full Happy runner, relay, real model account, and iPhone app were not part of this experiment. Do not treat its outputs as phone acceptance or as a configuration-preservation check.
+
+Observed cases:
+
+| Case | Result and boundary |
+| --- | --- |
+| Attach two clients | A thread with a completed first turn could be resumed by the second client. An unknown UUID was rejected. A newly created thread before its first turn returned `no rollout found`; adding `excludeTurns` did not remove that error in the tested calls. Blank-thread attachment needs separate handling. |
+| Bidirectional terminal turns | The actual native TUI displayed a peer-origin user message and response; a TUI-origin message and response appeared in the raw peer subscription. Happy received start, assistant response, and completion events for the TUI-origin turn, but omitted its user message. |
+| TUI detach and reconnect | Normal TUI exit returned code 0. With the experiment supervisor still alive, Happy completed another turn in that thread; the reattached native TUI displayed it. This did not test closing the supervisor's terminal or disconnecting it during an active turn. |
+| Command approval | One Happy-side denial and one native-TUI approval produced distinct rejected/completed tool results. A separate direct call on the actual Happy client showed that peer `serverRequest/resolved` left its pending approval count at 1, and a later local answer still attempted a response. Backend acceptance of that late answer and actual phone-card behavior were not tested. |
+| Native question | One `request_user_input` answer B reached the model tool result. A direct resolved-notification check changed the actual Happy question AbortSignal from false to true. Actual phone form dismissal was not tested. |
+| Input during an active turn | With one protocol-origin turn held at the model fixture, Happy's second input was accepted and persisted as another user message in the same turn. Its promise remained pending until release. This was one controlled overlap, not a test of every concurrent ordering or native keyboard steering. |
+| Cross-client cancellation | Two directions reached native `interrupted` status. When the Happy-origin turn was canceled by the peer, Happy returned `aborted:false` and emitted `task_complete/completed`; when Happy canceled the peer-origin turn without its own pending completion promise, it emitted `turn_aborted`. |
+
+The cancellation mismatch has a concrete ordering: `thread/status/changed` with `idle` arrived before `turn/completed` with `interrupted`. In `codexAppServerClient.ts`, `handleRawNotification` currently treats idle as a successful completion when a pending turn exists. `emitRawTurnCompletion` then records the turn as complete, suppressing the later authoritative completion event. Idle cannot establish that a turn succeeded.
+
+Before promoting this route to the normal mobile launcher, the fork maintainer needs to address the observed gaps: forward external user messages without duplicating Happy-origin inputs; cancel approval waits when another client resolves them; preserve authoritative interruption results; and establish blank-thread attachment. Shared turn tracking must respect that input can join an existing turn. The existing question AbortSignal path can be reused, but its phone consumer still needs acceptance.
+
+The later integration stage must also verify account selection/configuration, new/resume entrypoints, process ownership and deliberate stop versus TUI detach, phone submission/approval/question behavior over the existing public relay, and reconnects. These are pending integration work, not capabilities delivered by this experiment. No change to relay deployment or phone networking was made.
+
+Evidence is retained in the task artifact set `20261110-happy-mobile-01a1c5ad/work/native-tui`: `interactive-events-1.jsonl` and `happy-events-1.json` (shared turns), `terminal-receipts.json` (TUI exit/reconnect outputs with original transcript locators), `probe-events.jsonl` and `mock-requests.jsonl` (approval/question tool results), `peer-resolution-result.json` (resolved notification comparison), and `concurrency-events.jsonl`/`concurrency-result.json` (overlap and cancellation). The associated scripts are task-local experiments, not supported installation commands. An independent read-only review checked the raw records and client implementation; it did not add phone or real-provider coverage.
