@@ -3,6 +3,7 @@ import { EventEmitter } from 'node:events';
 import vm from 'node:vm';
 import ts from 'typescript';
 import { describe, expect, it } from 'vitest';
+import { codexAccountName } from './accountBridge';
 
 const noop = () => {};
 function deferred() {
@@ -78,7 +79,7 @@ function harness(preparation: boolean, slowCleanup: boolean) {
         QuestionForms: Forms, QuestionDeliveryError: Error, MessageQueue2: Queue,
         CodexRemoteModeState: class { resetAfterAbort = noop; }, logger, execSync: () => '', randomUUID: () => 'uuid',
         readSettings: async () => ({ machineId: 'm', ...(preparation ? {} : { sandboxConfig: { enabled: true } }) }),
-        initialMachineMetadata: {}, hashCodexEnhancedMode: noop,
+        initialMachineMetadata: {}, hashCodexEnhancedMode: noop, codexAccountName,
         configuration: {}, connectionState: { setBackend: noop }, createSessionMetadata: () => ({ state: {}, metadata: {} }),
         discoverCodexSkillCommands: async () => [], setupOfflineReconnection: () => ({ session }),
         notifyDaemonSessionStarted: async () => ({}), projectPath: () => '/mock', join: () => '/mock',
