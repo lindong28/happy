@@ -69,6 +69,27 @@ jobs:
     - name: Unit tests
       run: pnpm --filter happy-server --fail-if-no-match test
 
+  # Exercise the npm consumer without the monorepo's postinstall patches.
+  self-host-package:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+    - uses: actions/checkout@v4
+    - uses: pnpm/action-setup@v4
+    - uses: actions/setup-node@v4
+      with:
+        node-version: 24
+        cache: pnpm
+    - uses: oven-sh/setup-bun@v2
+    - run: pnpm install --frozen-lockfile --filter happy-server-self-host... --filter happy-server...
+    - run: pnpm --filter happy-server-self-host build
+    - name: Install packed server and read encrypted-key records
+      run: |
+        mkdir -p "$RUNNER_TEMP/happy-package" "$RUNNER_TEMP/happy-consumer"
+        pnpm --filter happy-server-self-host pack --pack-destination "$RUNNER_TEMP/happy-package"
+        npm install --prefix "$RUNNER_TEMP/happy-consumer" --no-audit --no-fund "$RUNNER_TEMP"/happy-package/*.tgz
+        node packages/happy-server-self-host/scripts/test-pglite-bytes.cjs "$RUNNER_TEMP/happy-consumer/node_modules/happy-server-self-host"
+
   # Builds the production image and proves it actually serves traffic.
   # A container whose CMD silently no-ops exits 0 immediately and would pass
   # every check except starting it, which is how a broken image shipped before.

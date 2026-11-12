@@ -21,6 +21,13 @@ if (!fs.existsSync(schema)) {
   process.exit(0);
 }
 
+// Unlike the workspace, npm consumers never run the repository postinstall.
+// Require the dependency here so a missing adapter cannot silently skip repair.
+require.resolve('pglite-prisma-adapter');
+const packagedPatch = path.join(root, 'dist/fix-pglite-prisma-bytes.cjs');
+const workspacePatch = path.resolve(root, '../../patches/fix-pglite-prisma-bytes.cjs');
+require(fs.existsSync(workspacePatch) ? workspacePatch : packagedPatch);
+
 const result = spawnSync('prisma', ['generate', `--schema=${schema}`], {
   cwd: root,
   stdio: 'inherit',

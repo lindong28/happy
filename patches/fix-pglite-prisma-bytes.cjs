@@ -11,18 +11,28 @@
  */
 const fs = require('fs');
 const path = require('path');
+const { createRequire } = require('module');
 
-const files = [
-    'node_modules/pglite-prisma-adapter/dist/index.mjs',
-    'node_modules/pglite-prisma-adapter/dist/index.cjs',
-    'packages/happy-server/node_modules/pglite-prisma-adapter/dist/index.mjs',
-    'packages/happy-server/node_modules/pglite-prisma-adapter/dist/index.cjs',
-];
+// This file also ships in the self-host package's dist/. Resolve from the
+// consumer so npm-hoisted and pnpm-linked dependencies use the same fix.
+const root = path.resolve(__dirname, '..');
+const files = new Set();
+for (const consumer of [root, path.join(root, 'packages/happy-server')]) {
+    let entry;
+    try {
+        entry = createRequire(path.join(consumer, 'package.json')).resolve('pglite-prisma-adapter');
+    } catch (error) {
+        if (error.code === 'MODULE_NOT_FOUND') continue;
+        throw error;
+    }
+    for (const name of ['index.mjs', 'index.cjs']) {
+        files.add(path.join(path.dirname(entry), name));
+    }
+}
 
 let patched = 0;
 
-for (const file of files) {
-    const filePath = path.resolve(__dirname, '..', file);
+for (const filePath of files) {
     if (!fs.existsSync(filePath)) continue;
 
     let content = fs.readFileSync(filePath, 'utf8');

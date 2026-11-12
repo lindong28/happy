@@ -98,3 +98,9 @@ const prismaTarget = path.join(root, 'prisma');
 fs.rmSync(prismaTarget, { recursive: true, force: true });
 fs.cpSync(prismaSource, prismaTarget, { recursive: true });
 console.log(`Copied prisma/ from ${path.relative(root, prismaSource)}`);
+
+// Keep standalone installs on the same adapter fix as workspace installs.
+fs.copyFileSync(
+  path.resolve(root, '../../patches/fix-pglite-prisma-bytes.cjs'),
+  path.join(dist, 'fix-pglite-prisma-bytes.cjs'),
+);
