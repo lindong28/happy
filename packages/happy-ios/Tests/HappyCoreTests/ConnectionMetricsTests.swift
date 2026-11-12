@@ -279,7 +279,123 @@ private final class FakeTunnel: SelfMeteringTransport, @unchecked Sendable {
     func close() async {}
 }
 
+private struct FailingMetricsSocket: WebSocketConnection {
+    var cancelled = false
+    func send(_ text: String) async throws { throw URLError(.cannotConnectToHost) }
+    func receive() async throws -> String { throw URLError(cancelled ? .cancelled : .cannotFindHost) }
+    func close() async {}
+}
+
+private actor DelayedMetricsConnector: WebSocketConnector {
+    let socket = FakeWebSocket()
+    let replacement = FakeWebSocket()
+    private var pending: CheckedContinuation<any WebSocketConnection, Never>?
+    var started = false
+    func connect(to url: URL) async throws -> any WebSocketConnection {
+        if started { return replacement }
+        return await withCheckedContinuation { continuation in
+            pending = continuation
+            started = true
+        }
+    }
+    func release() {
+        pending?.resume(returning: socket)
+        pending = nil
+    }
+}
+
 final class MeteredTransportTests: XCTestCase {
+    func testDisconnectClosesASocketThatFinishesConnectingLater() async throws {
+        let connector = DelayedMetricsConnector()
+        let metrics = ConnectionMetrics()
+        let client = SocketIOClient(url: URL(string: "wss://api.example.test/v1/updates/")!,
+                                    connector: MeteredWebSocketConnector(base: connector, metrics: metrics)) { .object([:]) }
+        await client.connect()
+        try await eventually { await connector.started }
+        await client.disconnect()
+        await connector.release()
+        try await eventually { await metrics.snapshot().totals.count(.streamsClosed, .socket) == 1 }
+        let snapshot = await metrics.snapshot()
+        XCTAssertEqual(snapshot.totals.count(.streamsOpened, .socket), 1)
+        XCTAssertNil(snapshot.openStreams[.socket])
+        await eventually {
+            do { try await connector.socket.send("closed-probe"); return false }
+            catch { return (error as? WebSocketError) == .closed }
+        }
+    }
+
+    func testCancelledConnectionCannotClearItsReplacement() async throws {
+        let connector = DelayedMetricsConnector()
+        let client = SocketIOClient(url: URL(string: "wss://api.example.test/v1/updates/")!, connector: connector) { .object([:]) }
+        await client.connect()
+        await eventually { await connector.started }
+        await client.disconnect()
+        await client.connect()
+        let replacement = connector.replacement
+        replacement.push(#"0{"sid":"s","upgrades":[],"pingInterval":15000,"pingTimeout":45000}"#)
+        replacement.push(#"40{"sid":"ns"}"#)
+        await eventually { await client.status == .connected }
+        await connector.release()
+        await eventually {
+            do { try await connector.socket.send("closed-probe"); return false }
+            catch { return (error as? WebSocketError) == .closed }
+        }
+        do {
+            try await client.emit("after-reconnect", .null)
+            XCTAssertTrue(replacement.sent.contains(#"42["after-reconnect",null]"#))
+        } catch { XCTFail("replacement must remain usable: \(error)") }
+        await client.disconnect()
+    }
+
+    func testWebSocketReceiveFailureReplacesStaleHTTPError() async throws {
+        let metrics = ConnectionMetrics()
+        metrics.failed("HTTP: old error")
+        let socket = MeteredWebSocketConnection(base: FailingMetricsSocket(), metrics: metrics, channel: .socket)
+        do {
+            _ = try await socket.receive()
+            XCTFail("receive must preserve the transport failure")
+        } catch {
+            XCTAssertEqual((error as? URLError)?.code, .cannotFindHost)
+        }
+        let snapshot = await metrics.snapshot()
+        XCTAssertEqual(snapshot.lastError, "Socket.IO: URLError -1003")
+        XCTAssertEqual(snapshot.totals.count(.connectionsClosed, .socket), 1)
+    }
+
+    func testWebSocketSendFailureIsRecordedAndRethrown() async throws {
+        let metrics = ConnectionMetrics()
+        let socket = MeteredWebSocketConnection(base: FailingMetricsSocket(), metrics: metrics, channel: .socket)
+        do {
+            try await socket.send("private payload")
+            XCTFail("send must preserve the transport failure")
+        } catch {
+            XCTAssertEqual((error as? URLError)?.code, .cannotConnectToHost)
+        }
+        let snapshot = await metrics.snapshot()
+        XCTAssertEqual(snapshot.lastError, "Socket.IO: URLError -1004")
+        XCTAssertEqual(snapshot.totals.count(.bytesSent, .socket), 0)
+    }
+
+    func testExplicitWebSocketCloseDoesNotReplaceTheLastError() async throws {
+        let metrics = ConnectionMetrics()
+        metrics.failed("previous failure")
+        let socket = MeteredWebSocketConnection(base: FailingMetricsSocket(), metrics: metrics, channel: .socket)
+        await socket.close()
+        _ = try? await socket.receive()
+        try? await socket.send("40")
+        let snapshot = await metrics.snapshot()
+        XCTAssertEqual(snapshot.lastError, "previous failure")
+        XCTAssertEqual(snapshot.totals.count(.connectionsClosed, .socket), 1)
+    }
+
+    func testWebSocketCancellationDoesNotBecomeANetworkFailure() async throws {
+        let metrics = ConnectionMetrics()
+        let socket = MeteredWebSocketConnection(base: FailingMetricsSocket(cancelled: true), metrics: metrics, channel: .socket)
+        _ = try? await socket.receive()
+        let snapshot = await metrics.snapshot()
+        XCTAssertNil(snapshot.lastError)
+    }
+
     func testHTTPCountsTheServerOnHTTPAndStorageOnMedia() async throws {
         let http = FakeHTTP()
         http.onRaw("GET /v1/sessions", #"{"sessions":[]}"#)
@@ -334,6 +450,7 @@ final class MeteredTransportTests: XCTestCase {
         XCTAssertEqual(totals.count(.connectionsOpened, .socket), 2)
         XCTAssertEqual(totals.count(.connectionsClosed, .socket), 1)
         XCTAssertEqual(snapshot.openStreams[.socket], 1)
+        XCTAssertNil(snapshot.lastError)
         withExtendedLifetime(second) {}
     }
 

@@ -42,6 +42,7 @@ public actor SocketIOClient {
 
     private var wantsConnection = false
     private var loop: Task<Void, Never>?
+    private var loopID: UUID?
     private var connection: WebSocketConnection?
     private var lastPacketAt = ContinuousClock.now
     private var nextAckId = 0
@@ -71,20 +72,24 @@ public actor SocketIOClient {
     public func connect() {
         wantsConnection = true
         guard loop == nil else { return }
-        loop = Task { await self.runLoop() }
+        let id = UUID()
+        loopID = id
+        loop = Task { await self.runLoop(id: id) }
     }
 
     public func disconnect() async {
         wantsConnection = false
         loop?.cancel()
         loop = nil
+        loopID = nil
+        let connection = self.connection
+        self.connection = nil
+        failPendingAcks(SocketIOError.closed)
+        setStatus(.disconnected)
         if let connection {
             try? await connection.send(EngineIOPacket.message(SocketIOPacket.disconnect.text).text)
             await connection.close()
         }
-        connection = nil
-        failPendingAcks(SocketIOError.closed)
-        setStatus(.disconnected)
     }
 
     /// Drops the current socket and connects again, e.g. after a token change.
@@ -126,9 +131,9 @@ public actor SocketIOClient {
 
     // MARK: Connection loop
 
-    private func runLoop() async {
+    private func runLoop(id: UUID) async {
         var attempt = 0
-        while wantsConnection && !Task.isCancelled {
+        while loopID == id && wantsConnection && !Task.isCancelled {
             setStatus(.connecting)
             var failed = false
             do {
@@ -136,6 +141,7 @@ public actor SocketIOClient {
             } catch {
                 failed = true
             }
+            guard loopID == id else { return }
             connection = nil
             failPendingAcks(SocketIOError.closed)
             guard wantsConnection && !Task.isCancelled else { break }
@@ -147,20 +153,27 @@ public actor SocketIOClient {
 
     private func runConnection(onConnected: () -> Void) async throws {
         let connection = try await connector.connect(to: url)
-        self.connection = connection
         defer { Task { await connection.close() } }
+        // A connector can finish after disconnect cancelled this loop.
+        // Close that socket without publishing it or awaiting its handshake.
+        try Task.checkCancellation()
+        self.connection = connection
 
         guard case .open(let handshake)? = EngineIOPacket(text: try await connection.receive()) else {
             throw SocketIOError.protocolViolation("expected Engine.IO open")
         }
+        try Task.checkCancellation()
         lastPacketAt = .now
         let watchdog = startWatchdog(handshake: handshake, connection: connection)
         defer { watchdog.cancel() }
 
-        try await connection.send(EngineIOPacket.message(SocketIOPacket.connect(await auth()).text).text)
+        let authentication = await auth()
+        try Task.checkCancellation()
+        try await connection.send(EngineIOPacket.message(SocketIOPacket.connect(authentication).text).text)
 
         while !Task.isCancelled {
             let text = try await connection.receive()
+            try Task.checkCancellation()
             lastPacketAt = .now
             guard let packet = EngineIOPacket(text: text) else { continue }
             switch packet {

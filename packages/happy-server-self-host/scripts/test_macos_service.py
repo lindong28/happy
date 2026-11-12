@@ -29,6 +29,8 @@ class ServiceTests(unittest.TestCase):
         self.loaded = {}
         self.bootouts = []
         self.fail_server = False
+        self.unload_pending = False
+        self.defer_unload = False
         self.home_patch = patch.object(service.Path, 'home', return_value=self.home)
         self.home_patch.start(); self.addCleanup(self.home_patch.stop)
         self.run_patch = patch.object(service.subprocess, 'run', side_effect=self.launchctl)
@@ -37,6 +39,12 @@ class ServiceTests(unittest.TestCase):
     def launchctl(self, args, **kw):
         action, label = args[1], args[2].split('/')[-1]
         if action == 'print':
+            if self.unload_pending:
+                # launchctl can acknowledge bootout before unregistering the job.
+                self.assertTrue((service.paths(self.home)[0] / 'owner.json').exists())
+                self.unload_pending = False
+                self.loaded.pop(label, None)
+                return subprocess.CompletedProcess(args, 0, 'arguments = {\n}\n' if kw.get('text') else b'arguments = {\n}\n', '')
             if label not in self.loaded:
                 return subprocess.CompletedProcess(args, 113, '' if kw.get('text') else b'', '')
             output = 'arguments = {\n' + '\n'.join(self.loaded[label]) + '\n}\n'
@@ -45,7 +53,10 @@ class ServiceTests(unittest.TestCase):
             self.bootouts.append(label)
             if self.fail_server and label.endswith('.server'):
                 raise subprocess.CalledProcessError(5, args)
-            self.loaded.pop(label, None)
+            if self.defer_unload:
+                self.unload_pending = True
+            else:
+                self.loaded.pop(label, None)
         return subprocess.CompletedProcess(args, 0, b'', b'')
 
     def invoke(self, *args):
@@ -93,6 +104,25 @@ class ServiceTests(unittest.TestCase):
         self.config.chmod(0o644)
         with self.assertRaisesRegex(ValueError, 'private'):
             self.invoke('install', '--config', str(self.config))
+
+    def test_uninstall_waits_for_launchd_to_release_label(self):
+        root, _, state = self.install()
+        self.loaded = {service.LABEL + '.' + k: v for k, v in state['arguments'].items()}
+        self.defer_unload = True
+        self.assertEqual(self.invoke('uninstall'), 0)
+        self.assertEqual(self.loaded, {})
+        self.assertFalse(self.unload_pending)
+        self.assertFalse((root / 'owner.json').exists())
+
+    def test_unload_deadline_preserves_ownership_proof(self):
+        root, agents, state = self.install()
+        self.loaded = {service.LABEL + '.' + k: v for k, v in state['arguments'].items()}
+        self.defer_unload = True
+        with patch.object(service.time, 'monotonic', side_effect=[0, 31]):
+            with self.assertRaisesRegex(ValueError, 'still pending'):
+                self.invoke('uninstall')
+        self.assertTrue((root / 'owner.json').exists())
+        self.assertTrue((agents / (service.LABEL + '.server.plist')).exists())
 
 
 if __name__ == '__main__':

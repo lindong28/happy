@@ -126,8 +126,13 @@ final class MeteredWebSocketConnection: WebSocketConnection, @unchecked Sendable
     }
 
     func send(_ text: String) async throws {
-        try await base.send(text)
-        metrics.sent(text.utf8.count, on: channel)
+        do {
+            try await base.send(text)
+            metrics.sent(text.utf8.count, on: channel)
+        } catch {
+            recordFailure(error)
+            throw error
+        }
     }
 
     func receive() async throws -> String {
@@ -136,14 +141,26 @@ final class MeteredWebSocketConnection: WebSocketConnection, @unchecked Sendable
             metrics.received(text.utf8.count, on: channel)
             return text
         } catch {
+            recordFailure(error)
             markClosed()
             throw error
         }
     }
 
+    private func recordFailure(_ error: Error) {
+        guard !Task.isCancelled, !(error is CancellationError),
+              (error as? URLError)?.code != .cancelled else { return }
+        lock.lock()
+        defer { lock.unlock() }
+        guard !closed else { return }
+        metrics.failed("\(channel.name): \(MeteredError.describe(error))")
+    }
+
     func close() async {
-        await base.close()
+        // Mark before cancelling the underlying receive, so an intentional
+        // shutdown cannot replace the failure that caused the reconnect.
         markClosed()
+        await base.close()
     }
 }
 

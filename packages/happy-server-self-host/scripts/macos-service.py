@@ -15,6 +15,7 @@ import plistlib
 import signal
 import subprocess
 import sys
+import time
 
 OWNER = str(Path(__file__).resolve())
 LABEL = 'local.happy-personal-relay'
@@ -162,6 +163,20 @@ def main():
             else:
                 if current.returncode == 0:
                     subprocess.run(['launchctl', 'bootout', domain + '/' + label], check=True, timeout=30)
+                    # bootout may return while launchd still owns the label.
+                    # Keep the ownership proof until a new owner can install.
+                    deadline = time.monotonic() + 30
+                    while True:
+                        unloaded = subprocess.run(['launchctl', 'print', domain + '/' + label], capture_output=True, timeout=5)
+                        if unloaded.returncode == 113:
+                            break
+                        if unloaded.returncode != 0:
+                            raise ValueError('Cannot confirm service unload; ownership retained')
+                        if time.monotonic() >= deadline:
+                            raise ValueError('Service unload still pending; ownership retained, retry later')
+                        time.sleep(0.2)
+                elif current.returncode != 113:
+                    raise ValueError('Cannot confirm service state; ownership retained')
         if args.action == 'uninstall':
             # Keep the complete ownership proof if either bootout fails, so the
             # operator can retry stop/start/uninstall through this same entry.
