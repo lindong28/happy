@@ -15,6 +15,8 @@ xtool dev build                    # Linux: the dev app bundle, needs `xtool sdk
 xcodegen && open Happy.xcodeproj   # macOS
 ```
 
+For live phone session checks, use [iPhone session acceptance](docs/DEVICE-ACCEPTANCE.md). It covers target identity, safe input and resuming an interrupted test, with separate fixture and real-device evidence.
+
 ## Codex native configuration development
 
 The personal downstream fork adds a read-only view for Happy CLI sessions started with `happy codex --native-config`. The composer reads the model, reasoning effort and permission values published from Codex's resolved thread response. It ignores old composer picks and account defaults for those sessions, and sends prompts without model, effort or permission overrides. Other session modes keep their existing behavior. See the [CLI development status](../happy-cli/README.md#codex-手机接续开发分支验证状态) for the remaining end-to-end checks.

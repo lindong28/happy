@@ -22,6 +22,10 @@ Why: an OTA channel serves whatever was published last, not whatever is on
 `main`. On 2026-09-20 a preview OTA from a stale worktree silently rolled four
 shipped fixes off every preview phone for hours. Git looked fine the whole time.
 
+## Real iPhone session checks
+
+Before testing an installed iPhone app through the phone or iPhone Mirroring, read [iPhone session acceptance](packages/happy-ios/docs/DEVICE-ACCEPTANCE.md). It owns this project's session selection, input and interruption procedure; simulator captures alone do not establish live phone behavior.
+
 ## Sync To Main
 
 When the user says `sync to main` or `synt to main`, they mean:
