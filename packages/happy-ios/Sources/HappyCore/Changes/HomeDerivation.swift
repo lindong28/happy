@@ -255,6 +255,8 @@ public struct HomeUpdate: Sendable {
     public var grouping: SessionListGrouping
     public var archiveModels: HomeArchiveModels?
     public var archiveSettings: HomeArchiveSettings?
+    public var machines: [HomeMachineOption] = []
+    public var selectedMachineId: String? = nil
 }
 
 /// Home's derivation: snapshot to content to changeset, off the main thread.
@@ -278,6 +280,7 @@ public enum HomeDerivation {
         /// Opt-in after the initial visible Home. Table and tablet consumers
         /// retain their existing derivation and update path.
         public var preparesArchives = false
+        public var selectedMachineId: String? = nil
 
         public init(
             snapshot: LegacyHomeSnapshot? = nil,
@@ -303,6 +306,8 @@ public enum HomeDerivation {
         public var grouping: SessionListGrouping?
         public var archiveModels: HomeArchiveModels?
         public var archiveSettings: HomeArchiveSettings?
+        public var machines: [HomeMachineOption] = []
+        public var selectedMachineId: String? = nil
 
         public init(content: HomeContent? = nil, dock: LegacyHomeSnapshot? = nil, grouping: SessionListGrouping? = nil) {
             self.content = content
@@ -313,16 +318,19 @@ public enum HomeDerivation {
 
     /// Nil when the screen already shows exactly this.
     public static func derive(_ input: Input, applied: Applied) -> (output: HomeUpdate, state: Applied)? {
-        guard let snapshot = input.snapshot else { return nil }
+        guard let fullSnapshot = input.snapshot else { return nil }
+        let machines = HomeMachineOption.collect(fullSnapshot)
+        let snapshot = HomeMachineFilter.snapshot(fullSnapshot, selectedId: input.selectedMachineId, options: machines)
         let clock = input.clock ?? SessionList.Clock()
-        let state = HomeState(snapshot, clock: clock, unknownMachine: input.unknownMachine)
+        let derivedState = HomeState(snapshot, clock: clock, unknownMachine: input.unknownMachine)
+        let state: HomeState = input.selectedMachineId != nil && derivedState == .link ? .noSessions : derivedState
         let content = HomeContent(state, expandedProjects: input.expandedProjects, draftSessionIds: input.draftSessionIds)
-        let dock = input.includesDock ? NewSessionSnapshot.rendered(snapshot) : nil
+        let dock = input.includesDock ? NewSessionSnapshot.rendered(fullSnapshot) : nil
         let dockChanged = dock != nil && dock != applied.dock
         let grouping = AccountSettings(snapshot.settings).sessionListGrouping
         let archiveModels = input.preparesArchives ? HomeArchiveModels.make(snapshot: snapshot, expandedProjects: input.expandedProjects, draftSessionIds: input.draftSessionIds, clock: clock, unknownMachine: input.unknownMachine, offline: content.list?.offline) : nil
         let archiveSettings = input.preparesArchives ? HomeArchiveSettings(snapshot.settings) : nil
-        guard content != applied.content || dockChanged || grouping != applied.grouping || archiveModels != applied.archiveModels || archiveSettings != applied.archiveSettings else { return nil }
+        guard content != applied.content || dockChanged || grouping != applied.grouping || archiveModels != applied.archiveModels || archiveSettings != applied.archiveSettings || machines != applied.machines || input.selectedMachineId != applied.selectedMachineId else { return nil }
         let before = applied.content?.list
         let after = content.list ?? .empty
         let rows = before?.rows ?? []
@@ -339,10 +347,13 @@ public enum HomeDerivation {
             dock: dockChanged ? dock : nil,
             grouping: grouping,
             archiveModels: archiveModels,
-            archiveSettings: archiveSettings
+            archiveSettings: archiveSettings,
+            machines: machines,
+            selectedMachineId: input.selectedMachineId
         )
         var next = Applied(content: content, dock: dock ?? applied.dock, grouping: grouping)
         next.archiveModels = archiveModels; next.archiveSettings = archiveSettings
+        next.machines = machines; next.selectedMachineId = input.selectedMachineId
         return (update, next)
     }
 }

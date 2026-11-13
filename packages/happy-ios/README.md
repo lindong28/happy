@@ -17,6 +17,14 @@ xcodegen && open Happy.xcodeproj   # macOS
 
 For live phone session checks, use [iPhone session acceptance](docs/DEVICE-ACCEPTANCE.md). It covers target identity, safe input and resuming an interrupted test, with separate fixture and real-device evidence.
 
+## Filter sessions by computer
+
+In a Happy CLI account, open the home screen's filter menu and choose **Computer → All computers** or a connected computer's name. The choice applies to both the flat and project lists, including their archived sessions. Offline computers remain selectable so their history stays readable. The selected name replaces the filter icon; choosing All computers restores the account-wide list. The selection lasts while this account's home screen stays open; reopening it starts with All computers.
+
+With a computer selected, tap compose to start there. The chat's computer picker still lets you change the destination before sending. Changing computers clears the previously selected folder and worktree, since those paths belong to the previous computer. With All computers selected, compose keeps the existing last-used destination. When the selected computer is unavailable, reconnect it or choose another before starting work.
+
+Computers come from the current account's machine registrations. Pair each additional computer with the **same account and relay server**; it then appears without an app update. The account switcher at the top is separate: a connection named after a computer can be a different account, with a different machine list. Existing accounts, credentials and history are retained when updating the app with the same bundle identity; no server migration is needed for this filter.
+
 ## Codex native configuration development
 
 The personal downstream fork adds a read-only view for Happy CLI sessions started with `happy codex --native-config`. The composer reads the model, reasoning effort and permission values published from Codex's resolved thread response. It ignores old composer picks and account defaults for those sessions, and sends prompts without model, effort or permission overrides. Other session modes keep their existing behavior. See the [CLI development status](../happy-cli/README.md#codex-手机接续开发分支验证状态) for the remaining end-to-end checks.

@@ -426,6 +426,7 @@ final class SessionListViewController: UIViewController {
 
 /// A reachable computer with nothing on it yet.
 final class NoSessionsViewController: UIViewController {
+    var onStartNewSession: (() -> Void)?
     private let context: AppContext
     private let session: AccountSession
     private let content = NoSessionsView()
@@ -454,6 +455,7 @@ final class NoSessionsViewController: UIViewController {
         }
         content.startNewSession.onTap = { [weak self] in
             guard let self else { return }
+            if let onStartNewSession { onStartNewSession(); return }
             self.push(.newSession(machineId: nil, path: nil, prompt: nil), context: self.context)
         }
     }

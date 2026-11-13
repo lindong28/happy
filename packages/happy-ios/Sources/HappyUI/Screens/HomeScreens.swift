@@ -43,6 +43,8 @@ public final class LegacyHomeViewController: UIViewController, ComposeHosting {
     private var state: HomeContent?
     /// The home filter's choice, as last derived.
     private var grouping: SessionListGrouping = .flat
+    private var machines: [HomeMachineOption] = []
+    private var selectedMachineId: String?
     private var content: UIViewController?
     /// The session the main panel beside home shows, on an iPad.
     private var shownSessionId: String?
@@ -145,7 +147,8 @@ public final class LegacyHomeViewController: UIViewController, ComposeHosting {
     /// where a computer is a home of its own, one is reachable. The bar
     /// shows compose only then.
     var canCompose: Bool {
-        switch state {
+        if let selectedMachineId, !machines.contains(where: { $0.machineIds.contains(selectedMachineId) }) { return false }
+        return switch state {
         case nil, .link?: false
         case .offline?: !Preference(variant: context.variant).isAvailable
         default: true
@@ -222,7 +225,17 @@ public final class LegacyHomeViewController: UIViewController, ComposeHosting {
     /// Returns how many rows it touched.
     private func apply(_ update: HomeUpdate) -> Int {
         grouping = update.grouping
+        let machinesChanged = machines != update.machines || selectedMachineId != update.selectedMachineId
+        machines = update.machines
+        selectedMachineId = update.selectedMachineId
         let touched = update.contentChanged ? show(update) : 0
+        if machinesChanged {
+            let selected = machines.first { $0.machineIds.contains(selectedMachineId ?? "") }
+            filterItem.image = selectedMachineId == nil ? .icon(.ionicons("filter"), size: 22) : nil
+            filterItem.title = selected?.name ?? (selectedMachineId == nil ? nil : Strings.ComputerFilter.unavailable)
+            filterItem.accessibilityLabel = selected?.name ?? Strings.ComputerFilter.all
+            updateNavigation(animated: false)
+        }
         (content as? SessionListViewController)?.setArchiveModels(update.archiveModels, settings: update.archiveSettings)
         prepareArchivesIfNeeded()
         return touched
@@ -284,10 +297,16 @@ public final class LegacyHomeViewController: UIViewController, ComposeHosting {
         case .loading, .link, .offline:
             HomeNoticeViewController(context: context, session: session, kind: Self.notice(update.content))
         case .noSessions:
-            NoSessionsViewController(context: context, session: session)
+            makeNoSessions()
         case .list(let model):
             makeList(model, changeset: update.changeset)
         }
+    }
+
+    private func makeNoSessions() -> UIViewController {
+        let controller = NoSessionsViewController(context: context, session: session)
+        controller.onStartNewSession = { [weak self] in self?.compose() }
+        return controller
     }
 
     /// What home says in place of the list, under its own bar.
@@ -388,7 +407,17 @@ public final class LegacyHomeViewController: UIViewController, ComposeHosting {
         ])
     }
 
-    private func filterMenuElements() -> [UIMenuElement] {
+    func filterMenuElements() -> [UIMenuElement] {
+        let all = UIAction(title: Strings.ComputerFilter.all, state: selectedMachineId == nil ? .on : .off) { [weak self] _ in
+            self?.selectMachine(nil)
+        }
+        let computerChoices = machines.map { machine in
+            let action = UIAction(title: machine.name, subtitle: Strings.Home.connectionStatus(machine.online ? .connected : .disconnected), identifier: UIAction.Identifier("computer-filter-\(machine.id)"), state: machine.machineIds.contains(selectedMachineId ?? "") ? .on : .off) { [weak self] _ in
+                self?.selectMachine(machine.id)
+            }
+            return action
+        }
+        let computers = UIMenu(title: Strings.ComputerFilter.title, options: .displayInline, children: [all] + computerChoices)
         let current = grouping
         let options: [(SessionListGrouping, String)] = [
             (.flat, Strings.SessionsFilter.flatList),
@@ -409,7 +438,11 @@ public final class LegacyHomeViewController: UIViewController, ComposeHosting {
             guard let self else { return }
             push(.settingsAppearance, context: context)
         }
-        return [grouping, UIMenu(options: .displayInline, children: [appearance])]
+        return [computers, grouping, UIMenu(options: .displayInline, children: [appearance])]
+    }
+
+    func selectMachine(_ id: String?) {
+        pipeline?.update { $0.selectedMachineId = id }
     }
 
     /// What the title says of the account's link (`LegacyLink`): the
@@ -452,6 +485,17 @@ public final class LegacyHomeViewController: UIViewController, ComposeHosting {
     func compose() {
         guard canCompose, let navigation = navigationController, navigation.topViewController === self,
               navigation.transitionCoordinator == nil else { return }
+        if let selectedMachineId,
+           let machine = machines.first(where: { $0.machineIds.contains(selectedMachineId) }) {
+            let drafts = NewSessionDraftStore.shared(for: context.account.localSettings)
+            // This explicit computer starts a session. A kept Bot/Task
+            // draft would otherwise reroute it to another capable computer.
+            drafts.setCreatesBot(false)
+            drafts.setCreatesTask(false)
+            if !machine.machineIds.contains(drafts.draft.selectedMachineId ?? "") {
+                drafts.setMachineId(machine.id)
+            }
+        }
         let chat = LegacyChatViewController(context: context, session: session, sessionId: ComposeChat.makeId())
         // The keyboard first, then the push in its frame (`KeyboardPush`).
         KeyboardPush.push(chat, on: navigation)
