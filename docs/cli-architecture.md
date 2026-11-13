@@ -391,6 +391,8 @@ Sockets live in private, user-owned directories under `HAPPY_HOME_DIR/native`. T
 
 `CodexAppServerClient` forwards native user messages, associates completions with turn IDs, and consumes authoritative completion status rather than inferring success from idle. Peer resolution aborts outstanding approval/question waits. Happy-origin message IDs prevent duplicate relay echoes. Empty threads are materialized with `thread/name/set` before first attachment.
 
+In native mobile mode, the Codex thread name is copied from start/resume/fork responses and `thread/name/updated` notifications to Happy's existing `metadata.summary.text`. The iOS session list and chat header both read that field; no app update or additional model request is needed for this mapping. Updates are scoped to the active thread, including when the backend uses legacy turn events. The bridge does not invent a title: a new empty thread currently starts with the materialization name `Codex mobile`, and a subsequent Codex rename replaces it. Installing a new CLI does not replace an already-running worker; it takes effect when a new worker starts. Old Happy records are not bulk-renamed on installation.
+
 Development checks on macOS with Codex 0.167.0 exercised real-account startup, cold resume, normal detach/reattach, fixed-thread rejection and terminal resizing. The iPhone displayed a native-origin input and reply. Phone-origin submission, the installed command and fleet acceptance remain separate checks; protocol tests do not establish them. Installation and current acceptance are maintained in `system-config/happy-personal/README.md`.
 
 ## Native Codex TUI feasibility (2026-11-12, historical baseline)

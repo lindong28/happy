@@ -894,6 +894,7 @@ export class CodexAppServerClient {
         this.rawSubagentActivitySignaturesByItemId.clear();
         this.rememberThreadDefaults(opts);
         logger.debug('[CodexAppServer] Thread started:', this._threadId);
+        this.emitThreadName(result.thread.id, result.thread.name);
         return { threadId: result.thread.id, model: result.model };
     }
 
@@ -940,6 +941,7 @@ export class CodexAppServerClient {
             mcpServers: opts?.mcpServers ?? defaults.mcpServers,
         });
         logger.debug('[CodexAppServer] Thread resumed:', this._threadId);
+        this.emitThreadName(result.thread.id, result.thread.name);
         return { threadId: result.thread.id, model: result.model };
     }
 
@@ -977,6 +979,7 @@ export class CodexAppServerClient {
             mcpServers: opts.mcpServers ?? defaults.mcpServers,
         });
         logger.debug('[CodexAppServer] Thread forked:', opts.threadId, '->', this._threadId);
+        this.emitThreadName(result.thread.id, result.thread.name);
         return { threadId: result.thread.id, model: result.model, thread: result.thread };
     }
 
@@ -1681,7 +1684,17 @@ export class CodexAppServerClient {
         return 'denied'; // default: deny if no handler
     }
 
+    private emitThreadName(threadId: string, name: unknown): void {
+        if (threadId !== this._threadId || typeof name !== 'string' || !name.trim()) return;
+        this.eventHandler?.({ type: 'thread_name_updated', threadId, name });
+    }
+
     private handleNotification(method: string, params: any): void {
+        // This v2 notification is also sent by backends using legacy turn events.
+        if (method === 'thread/name/updated') {
+            this.emitThreadName(params?.threadId, params?.threadName);
+            return;
+        }
         if (this.nativeSocketPath && this._threadId && params?.threadId && params.threadId !== this._threadId
             && (method.startsWith('turn/') || method === 'thread/status/changed')) return;
         if (method === 'thread/settings/updated' && params?.threadId === this._threadId) {

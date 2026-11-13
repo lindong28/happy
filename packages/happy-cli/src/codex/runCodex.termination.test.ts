@@ -18,7 +18,7 @@ function compile(name: string) {
 }
 
 // Execute the actual runner and client lifecycle, replacing only external I/O.
-function harness(preparation: boolean, slowCleanup: boolean) {
+function harness(preparation: boolean, slowCleanup: boolean, native = false) {
     const events: string[] = [];
     const prepared = deferred(), releasePrepare = deferred(), started = deferred();
     const cleaning = deferred(), releaseCleanup = deferred();
@@ -55,7 +55,9 @@ function harness(preparation: boolean, slowCleanup: boolean) {
         setMcpElicitationHandler = noop;
         setQuestionHandler = noop;
         setApprovalHandler = noop;
-        setEventHandler = noop;
+        async nativeBackendPid() { return 123; }
+        async startThread() { return { threadId: 'thread', model: 'test' }; }
+        async materializeNativeThread() { this.emitThreadName('thread', 'Existing Codex title'); }
         setNotificationHandler = noop;
         setAsyncQuestionHandler = noop;
     }
@@ -65,9 +67,10 @@ function harness(preparation: boolean, slowCleanup: boolean) {
         waitForMessagesAndGetAsString = async () => ({ message: 'hello', mode: {}, attachments: [] });
         size = () => 0;
     }
+    let metadata: any = { path: '/mock', host: 'test' };
     const session = {
         sessionId: 's', rpcHandlerManager: { registerHandler: noop }, onFileEvent: noop, onUserMessage: noop,
-        updateAgentState: noop, updateMetadata: noop, keepAlive: noop, sendSessionEvent: noop,
+        updateAgentState: noop, updateMetadata: (update: any) => { metadata = update(metadata); }, keepAlive: noop, sendSessionEvent: noop,
         sendSessionDeath: () => events.push('death'), flush: async () => {},
         close: async () => { events.push('close'); }, getMetadata: () => ({}),
     };
@@ -86,6 +89,8 @@ function harness(preparation: boolean, slowCleanup: boolean) {
         registerKillSessionHandler: noop, bindQuestionFormDisplay: noop, createSerialAsyncHandler: (x: any) => x,
         startHappyServer: async () => ({ url: 'mock', stop: noop }), nativeConfigMetadata: () => ({}),
         isCodexClearText: () => false, parseCodexGoalCommand: () => null, resolveCodexExecutionPolicy: () => ({}),
+        acquireNativeLease: async () => ({ stdin: { end: noop } }),
+        publishNativeMobileReady: async () => noop,
         prepareCodexImageInputItems: async () => {
             prepared.resolve();
             if (preparation) await releasePrepare.promise;
@@ -102,11 +107,28 @@ function harness(preparation: boolean, slowCleanup: boolean) {
     values.registerSessionTermination = context.exports.registerSessionTermination;
     context.exports = {};
     vm.runInNewContext(compile('./runCodex.ts'), context);
-    const running = context.exports.runCodex({ credentials: {}, nativeConfig: preparation });
-    return { events, proc, prepared, releasePrepare, started, cleaning, releaseCleanup, running, client: () => client };
+    const running = context.exports.runCodex({ credentials: {}, nativeConfig: preparation, ...(native ? { nativeMobileDirectory: '/mock' } : {}) });
+    return { events, proc, prepared, releasePrepare, started, cleaning, releaseCleanup, running, client: () => client, metadata: () => metadata };
 }
 
 describe('Codex termination through the runner', () => {
+    it.each([false, true])('publishes Codex names to the phone metadata only in native mode (%s)', async native => {
+        const h = harness(true, false, native);
+        await Promise.race([h.prepared.promise, h.running]);
+        try {
+            if (native) expect(h.metadata().summary.text).toBe('Existing Codex title');
+            h.client().handleNotification('thread/name/updated', { threadId: 'thread', threadName: 'Updated title' });
+            expect(h.metadata().summary?.text).toBe(native ? 'Updated title' : undefined);
+            h.client().handleNotification('thread/name/updated', { threadId: 'other', threadName: 'Other session' });
+            expect(h.metadata().summary?.text).toBe(native ? 'Updated title' : undefined);
+            expect(h.metadata().path).toBe('/mock');
+        } finally {
+            h.proc.emit('SIGTERM');
+            h.releasePrepare.resolve();
+            await h.running;
+        }
+    });
+
     it('does not submit a turn when terminated during asynchronous preparation', async () => {
         const h = harness(true, false);
         await Promise.race([h.prepared.promise, h.running]);

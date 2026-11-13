@@ -151,6 +151,38 @@ describe('CodexAppServerClient sandbox integration', () => {
         expect(new CodexAppServerClient().supportsGoalActions()).toBe(false);
     });
 
+    it('publishes existing Codex names on start, resume and fork', async () => {
+        const { CodexAppServerClient } = await import('./codexAppServerClient');
+        const client = new CodexAppServerClient();
+        const events = vi.fn();
+        client.setEventHandler(events);
+        const request = vi.spyOn(client as any, 'request');
+        for (const [id, name, operation] of [
+            ['first', '设计本地多端语音记录系统', 'start'],
+            ['second', 'Investigate session titles', 'resume'],
+            ['third', 'Forked task', 'fork'],
+        ] as const) {
+            request.mockResolvedValueOnce({ thread: { id, name }, model: 'test' });
+            if (operation === 'start') await client.startThread({});
+            else if (operation === 'resume') await client.resumeThread({ threadId: id });
+            else await client.forkThread({ threadId: 'second' });
+            expect(events).toHaveBeenLastCalledWith({ type: 'thread_name_updated', threadId: id, name });
+        }
+    });
+
+    it.each(['raw', 'legacy'])('forwards name updates under %s protocol only for the active thread', async protocol => {
+        const { CodexAppServerClient } = await import('./codexAppServerClient');
+        const client = new CodexAppServerClient();
+        const events = vi.fn();
+        client.setEventHandler(events);
+        (client as any)._threadId = 'current';
+        (client as any).notificationProtocol = protocol;
+        (client as any).handleNotification('thread/name/updated', { threadId: 'other', threadName: 'Wrong task' });
+        expect(events).not.toHaveBeenCalled();
+        (client as any).handleNotification('thread/name/updated', { threadId: 'current', threadName: 'Renamed task' });
+        expect(events).toHaveBeenLastCalledWith({ type: 'thread_name_updated', threadId: 'current', name: 'Renamed task' });
+    });
+
     it('retains resolved settings from both thread start and resume', async () => {
         const { CodexAppServerClient } = await import('./codexAppServerClient');
         const client = new CodexAppServerClient();

@@ -780,6 +780,16 @@ export async function runCodex(opts: {
 
     // Event handler: same EventMsg types as the legacy MCP server — no changes needed
     client.setEventHandler((msg) => {
+        if (msg.type === 'thread_name_updated') {
+            const name = msg.name;
+            if (opts.nativeMobileDirectory && msg.threadId === client.threadId && typeof name === 'string') {
+                session.updateMetadata(current => ({
+                    ...current,
+                    summary: { text: name, updatedAt: Date.now() },
+                }));
+            }
+            return;
+        }
         if (msg.type === 'backend_disconnected') {
             cancelQuestions();
             if (opts.nativeMobileDirectory && !shouldExit) void terminateSession();
