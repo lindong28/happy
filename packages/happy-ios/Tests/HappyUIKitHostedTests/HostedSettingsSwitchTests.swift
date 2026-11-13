@@ -445,7 +445,7 @@ final class HostedSettingsSwitchTests: XCTestCase {
 
     private func name(_ app: App, _ id: String) -> String? {
         if let computer = app.account.agentConnections.accounts.first(where: { $0.id == id }) { return computer.name }
-        return app.account.accounts.first { $0.id == id }?.shownName
+        return Strings.ComputerFilter.all
     }
 
     /// Every switch from Settings, Happy and computer either way, then back

@@ -399,6 +399,9 @@ final class HostedLinkTitleTests: XCTestCase {
         try await until("the list") { home.children.contains { $0 is SessionListViewController } }
         let link = LegacyLink.link(for: account)
         // The socket's own "connecting" has come.
+        // A specific computer gives the title/status width transition
+        // meaningful room; All computers and Updating can be almost equal.
+        home.selectMachine(SeededAccount.machineId)
         try await Task.sleep(for: .milliseconds(300))
         XCTAssertEqual(link.status, .connecting)
         link.receive(status: .connected)
@@ -407,7 +410,7 @@ final class HostedLinkTitleTests: XCTestCase {
         try await until("live: the name", 3) { home.headerState == .online && self.shows(switcher) == nil && switcher.titleLaneView.alpha == 1 }
         try await Task.sleep(for: .milliseconds(400))
         // Beside the sidebar (a tablet) home has no items at the right.
-        let items = home.navigationItem.rightBarButtonItems?.isEmpty == false ? ["filter", "settings"] : []
+        let items = home.navigationItem.rightBarButtonItems?.isEmpty == false ? ["settings"] : []
         let resting = try header(navigation, switcher, items: items)
         let nameWidth = switcher.bounds.width
         try await captureBoth(window, "legacy-1-live")

@@ -266,10 +266,14 @@ final class SettingsViewController: UIViewController, UIScrollViewDelegate, UISe
             if account.isAgentConnection, let computer = direct.first(where: { $0.id == account.id }) {
                 return Profile(id: account.id, name: computer.name, subtitle: Strings.AccountKind.subtitle(Strings.agentConnection, computer.revoked && computer.server != nil ? Strings.ServerSignIn.needsSignIn : computer.status.title), isAgentConnection: true, isActive: account.isActive)
             }
-            // One with no name of its own is already called by its kind.
+            // Relay connections group computers; they aren't themselves a
+            // physical computer. Preserve chosen names and show the server
+            // so old and new connections can still be distinguished.
             let username = account.username.map { "@\($0)" }
-            let subtitle = account.shownName == account.kindName ? username ?? "" : Strings.AccountKind.subtitle(account.kindName, username)
-            return Profile(id: account.id, name: account.shownName, subtitle: subtitle, kind: account.kindName, isAgentConnection: false, isActive: account.isActive)
+            let name = account.resolvedName ?? Strings.ComputerFilter.myComputers
+            let detail = [account.serverURL.host, username].compactMap { $0 }.joined(separator: " · ")
+            let subtitle = Strings.AccountKind.subtitle(account.kindName, detail)
+            return Profile(id: account.id, name: name, subtitle: subtitle, kind: account.kindName, isAgentConnection: false, isActive: account.isActive)
         }
         // With none left, the window's root is the link screen and this
         // page goes with the old one (`AppCoordinator.install`); it lets
@@ -463,6 +467,7 @@ final class SettingsViewController: UIViewController, UIScrollViewDelegate, UISe
                 liveSeed: liveSeeds[profile.id],
                 value: profile.id == shownID ? "✓" : nil,
                 accessory: .none,
+                subtitle: profile.isAgentConnection ? nil : profile.subtitle,
                 action: { [weak self] in self?.choose(index) },
                 // Any of them goes from here, the shown one or not.
                 menu: [Row.MenuItem(title: profile.isAgentConnection && server == nil ? Strings.disconnect : Strings.signOut, glyph: "log-out-outline", destructive: true) { [weak self] in

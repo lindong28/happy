@@ -193,6 +193,8 @@ final class HostedComposeTests: XCTestCase {
         window.overrideUserInterfaceStyle = .light
         window.layoutIfNeeded()
         try await until { home.children.contains { $0 is SessionListViewController } && home.canCompose }
+        home.selectMachine(SeededAccount.machineId)
+        try await until { (home.filterMenuElements().first as? UIMenu)?.children.compactMap { $0 as? UIAction }.contains { $0.identifier.rawValue == "computer-filter-\(SeededAccount.machineId)" && $0.state == .on } == true }
         return (home, navigation, window, account, context)
     }
 

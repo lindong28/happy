@@ -5,5 +5,6 @@ extension Strings {
         public static var title: String { localized("native.computerFilter.title", "Computer") }
         public static var all: String { localized("native.computerFilter.all", "All computers") }
         public static var unavailable: String { localized("native.computerFilter.unavailable", "Computer unavailable") }
+        public static var myComputers: String { localized("native.computerFilter.myComputers", "My computers") }
     }
 }

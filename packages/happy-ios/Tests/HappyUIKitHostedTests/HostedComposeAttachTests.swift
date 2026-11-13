@@ -198,6 +198,8 @@ final class HostedComposeAttachTests: XCTestCase {
         window.overrideUserInterfaceStyle = .light
         self.window = window
         try await wait { home.children.contains { $0 is SessionListViewController } && home.canCompose }
+        home.selectMachine(SeededAccount.machineId)
+        try await wait { (home.filterMenuElements().first as? UIMenu)?.children.compactMap { $0 as? UIAction }.contains { $0.identifier.rawValue == "computer-filter-\(SeededAccount.machineId)" && $0.state == .on } == true }
         home.compose()
         try await wait { self.navigation.topViewController is LegacyChatViewController && self.navigation.transitionCoordinator == nil }
         chat = try XCTUnwrap(navigation.topViewController as? LegacyChatViewController)

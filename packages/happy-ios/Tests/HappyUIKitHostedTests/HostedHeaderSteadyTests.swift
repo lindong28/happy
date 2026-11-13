@@ -116,7 +116,9 @@ final class HostedHeaderSteadyTests: XCTestCase {
             let first = try XCTUnwrap(rows.min { $0.frame.minY < $1.frame.minY })
             return Where(
                 bar: navigation.navigationBar.convert(navigation.navigationBar.bounds, to: window),
-                switcher: switcher.convert(switcher.bounds, to: window).integral,
+                // As on the agent home below: discard floating-point
+                // conversion noise, not a whole point via outward rounding.
+                switcher: switcher.convert(switcher.bounds, to: window).rounded(),
                 // In its lane: the lane lifts it away as the status comes.
                 // Rounded past float noise from a fractional width.
                 name: name.frame.rounded(),

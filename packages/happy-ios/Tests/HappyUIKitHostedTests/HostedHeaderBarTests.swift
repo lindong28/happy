@@ -231,7 +231,7 @@ final class HostedHeaderBarTests: XCTestCase {
         XCTAssertTrue(condition())
     }
 
-    func testLegacyHomeHasTheSwitcherAndTheClearBar() async throws {
+    func testLegacyHomeHasTheComputerFilterAndTheClearBar() async throws {
         let controller = AccountController(
             serverConfig: ServerConfig(storage: InMemoryKeyValueStore()), clientID: "ios/test",
             credentialStore: InMemoryCredentialStore(), storeDirectory: nil,
@@ -249,12 +249,10 @@ final class HostedHeaderBarTests: XCTestCase {
         defer { window.isHidden = true }
         window.layoutIfNeeded()
         try await Task.sleep(for: .milliseconds(500))
-        XCTAssertEqual(home.navigationItem.leftBarButtonItem?.customView?.accessibilityIdentifier, "account-switcher")
-        // Read on screen from the left: filter, compose (when this home
-        // composes), settings outermost. Named, so a test needs no label.
+        XCTAssertEqual(home.navigationItem.leftBarButtonItem?.customView?.accessibilityIdentifier, "computer-filter")
+        // Accounts are in settings; the only home choice is the computer.
         let trailing = (home.navigationItem.rightBarButtonItems ?? []).reversed().compactMap(\.accessibilityIdentifier)
-        XCTAssertEqual(trailing.first, "filter")
-        XCTAssertEqual(trailing.last, "settings")
+        XCTAssertEqual(trailing, ["settings"])
         XCTAssertNil(home.navigationItem.standardAppearance)
         Self.assertClear(navigation.navigationBar)
         keep(window, "legacy-home-light")

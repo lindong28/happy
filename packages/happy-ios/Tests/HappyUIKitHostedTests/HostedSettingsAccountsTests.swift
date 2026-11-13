@@ -150,6 +150,11 @@ final class HostedSettingsAccountsTests: XCTestCase {
         XCTAssertEqual(accounts.filter { $0.hasPrefix("account:") }.count, 1, "\(accounts)")
         XCTAssertEqual(settings.tickedRowIDs.count, 1, "\(settings.tickedRowIDs)")
         XCTAssertEqual(settings.tickedRowIDs.first, "account:\(try XCTUnwrap(settings.shownProfileID))")
+        let relay = try XCTUnwrap(controller.accounts.first { !$0.isAgentConnection })
+        let row = try XCTUnwrap(settings.shownRow("account:\(relay.id)"))
+        XCTAssertEqual(row.title, relay.resolvedName ?? Strings.ComputerFilter.myComputers)
+        XCTAssertTrue(row.subtitle?.contains(try XCTUnwrap(relay.serverURL.host)) == true)
+        XCTAssertTrue(row.subtitle?.contains(Strings.legacyAccount) == true)
         capture(window, "settings-accounts-one")
         withExtendedLifetime(controller) {}
     }

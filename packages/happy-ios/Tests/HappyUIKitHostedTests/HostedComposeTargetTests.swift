@@ -230,12 +230,22 @@ final class HostedComposeTargetTests: XCTestCase {
         window.overrideUserInterfaceStyle = .light
         window.layoutIfNeeded()
         try await until { (seed != nil || home.children.contains { $0 is SessionListViewController }) && home.canCompose }
+        let computers = HomeMachineOption.collect(try store.homeSnapshot())
+        if let target = computers.first(where: { $0.machineIds.contains(Self.oldMac) }) ?? computers.first {
+            home.selectMachine(target.id)
+            try await until { (home.filterMenuElements().first as? UIMenu)?.children.compactMap { $0 as? UIAction }.contains { $0.identifier.rawValue == "computer-filter-\(target.id)" && $0.state == .on } == true }
+        } else {
+            // These fixtures exercise an already-open composer's late
+            // machine feed, independently of home's destination picker.
+            let chat = LegacyChatViewController(context: context, session: account, sessionId: ComposeChat.makeId())
+            navigation.pushViewController(chat, animated: false)
+        }
         return (home, navigation, window, account)
     }
 
     /// The empty chat, its keyboard up.
     private func emptyChat(_ home: LegacyHomeViewController, _ navigation: UINavigationController) async throws -> (LegacyChatViewController, AgentInputCardView, NewWorkPanel, LegacyComposeStart) {
-        home.compose()
+        if navigation.topViewController === home { home.compose() }
         try await until { navigation.transitionCoordinator == nil && navigation.topViewController is LegacyChatViewController }
         let chat = try XCTUnwrap(navigation.topViewController as? LegacyChatViewController)
         try await until { chat.contentInstalled && Self.subview(AgentInputCardView.self, in: chat.view) != nil }

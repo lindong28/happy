@@ -14,9 +14,9 @@ import UIKit
 ///   - "No sessions yet" on a reachable computer with nothing on it;
 ///   - the session list otherwise.
 ///
-/// Every state has home's bar: the account switcher at the left, its name
-/// giving way to the link's status while the account isn't live
-/// (`AccountSwitcher.link`), and the filter menu and settings at the right.
+/// Every state has home's bar: the computer filter at the left, its name
+/// giving way to the link's status while the account isn't live, and
+/// settings at the right. Accounts and servers are chosen in settings.
 /// As the iPad's sidebar (`SidebarColumnTrait`) settings and compose are
 /// the sidebar's own bar at its foot instead (`SidebarBottomBar`).
 ///
@@ -49,7 +49,17 @@ public final class LegacyHomeViewController: UIViewController, ComposeHosting {
     /// The session the main panel beside home shows, on an iPad.
     private var shownSessionId: String?
     private var preparesArchives = false
-    private var switcher: AccountSwitcher?
+    private lazy var computerButton: AccountSwitcherButton = {
+        let button = AccountSwitcherButton()
+        button.title = Strings.ComputerFilter.all
+        button.picture = UIImage(systemName: "desktopcomputer")
+        button.accessibilityIdentifier = "computer-filter"
+        button.accessibilityLabel = Strings.ComputerFilter.title
+        button.showsMenuAsPrimaryAction = true
+        button.menu = filterMenu()
+        button.frame.size = button.sizeThatFits(.zero)
+        return button
+    }()
     /// The list's room under the bar and above the toolbar, as home last
     /// stood with it (`HomeListRoom`).
     private var room: HomeListRoom?
@@ -86,7 +96,6 @@ public final class LegacyHomeViewController: UIViewController, ComposeHosting {
         bottomBar.isHidden = true
         view.addSubview(bottomBar)
         minimalBackButton()
-        switcher = AccountSwitcher(context: context, controller: self)
         let pipeline = ApplyPipeline<HomeDerivation.Input, HomeDerivation.Applied, HomeUpdate>(
             input: HomeDerivation.Input(
                 expandedProjects: context.account.localSettings.expandedProjects,
@@ -205,7 +214,11 @@ public final class LegacyHomeViewController: UIViewController, ComposeHosting {
 
     public override func viewDidLayoutSubviews() {
         super.viewDidLayoutSubviews()
-        switcher?.layout()
+        if let bar = navigationController?.navigationBar {
+            computerButton.maximumWidth = AccountSwitcherLayout.availableWidth(
+                barWidth: bar.bounds.width, safeArea: LayoutInsets(bar.safeAreaInsets),
+                trailingItems: navigationItem.rightBarButtonItems?.count ?? 0)
+        }
         var control: CGRect?
         if !bottomBar.isHidden {
             let bar = bottomBar.layout(size: view.bounds.size, safeArea: LayoutInsets(view.safeAreaInsets))
@@ -231,9 +244,10 @@ public final class LegacyHomeViewController: UIViewController, ComposeHosting {
         let touched = update.contentChanged ? show(update) : 0
         if machinesChanged {
             let selected = machines.first { $0.machineIds.contains(selectedMachineId ?? "") }
-            filterItem.image = selectedMachineId == nil ? .icon(.ionicons("filter"), size: 22) : nil
-            filterItem.title = selected?.name ?? (selectedMachineId == nil ? nil : Strings.ComputerFilter.unavailable)
-            filterItem.accessibilityLabel = selected?.name ?? Strings.ComputerFilter.all
+            computerButton.title = selected?.name ?? (selectedMachineId == nil ? Strings.ComputerFilter.all : Strings.ComputerFilter.unavailable)
+            computerButton.frame.size = computerButton.sizeThatFits(.zero)
+            navigationController?.navigationBar.setNeedsLayout()
+            updateComputerStatus()
             updateNavigation(animated: false)
         }
         (content as? SessionListViewController)?.setArchiveModels(update.archiveModels, settings: update.archiveSettings)
@@ -363,8 +377,8 @@ public final class LegacyHomeViewController: UIViewController, ComposeHosting {
         let floating = true
         if floating {
             let sidebar = traitCollection.isSidebarColumn
-            navigationItem.leftBarButtonItem = switcher?.barItem
-            let items: [HeaderBar.Trailing: UIBarButtonItem] = sidebar ? [.filter: filterItem] : [.filter: filterItem, .settings: settingsItem]
+            navigationItem.leftBarButtonItem = filterItem
+            let items: [HeaderBar.Trailing: UIBarButtonItem] = sidebar ? [:] : [.settings: settingsItem]
             bottomBar.isHidden = !sidebar
             bottomBar.showsCompose = canCompose
             // The same items each time: a button rebuilt under a finger
@@ -445,11 +459,30 @@ public final class LegacyHomeViewController: UIViewController, ComposeHosting {
         pipeline?.update { $0.selectedMachineId = id }
     }
 
-    /// What the title says of the account's link (`LegacyLink`): the
-    /// account's name while it is online, else the status in its place.
+    /// The relay's link remains visible even though account switching
+    /// lives in settings. The selected computer is kept for VoiceOver.
     /// Not private, so a test can flip it.
     var headerState: Strings.HeaderStatus.State = .online {
-        didSet { if headerState != oldValue { switcher?.link = headerState } }
+        didSet {
+            guard headerState != oldValue else { return }
+            updateComputerStatus()
+            linkAnnouncement?.cancel()
+            let announcement = DispatchWorkItem { [weak self] in
+                guard let self, headerState != announcedLink, viewIfLoaded?.window != nil else { return }
+                announcedLink = headerState
+                guard let words = AccountSwitcher.announcement(for: headerState) else { return }
+                UIAccessibility.post(notification: .announcement, argument: words)
+            }
+            linkAnnouncement = announcement
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5, execute: announcement)
+        }
+    }
+    private var announcedLink: Strings.HeaderStatus.State = .online
+    private var linkAnnouncement: DispatchWorkItem?
+    private func updateComputerStatus() {
+        let status = Strings.HeaderStatus.title(headerState)
+        computerButton.setStatus(status, animated: true, bar: navigationController?.navigationBar)
+        computerButton.accessibilityValue = [status, computerButton.title].compactMap { $0 }.joined(separator: ", ")
     }
     private var linkWatch: Watch?
 
@@ -467,11 +500,11 @@ public final class LegacyHomeViewController: UIViewController, ComposeHosting {
     }()
 
     private lazy var filterItem: UIBarButtonItem = {
-        let item = UIBarButtonItem(image: .icon(.ionicons("filter"), size: 22), menu: filterMenu())
-        item.accessibilityLabel = Strings.Home.filterTitle
+        let item = UIBarButtonItem(customView: computerButton)
+        item.accessibilityLabel = Strings.ComputerFilter.title
         // As `HeaderBar`'s own items are named, so a test finds it without
         // depending on the label's language.
-        item.accessibilityIdentifier = "filter"
+        item.accessibilityIdentifier = "computer-filter"
         item.preferredMenuElementOrder = .fixed
         return item
     }()
@@ -480,21 +513,39 @@ public final class LegacyHomeViewController: UIViewController, ComposeHosting {
         push(.settings, context: context)
     }
 
-    /// The bar's compose: an empty chat, whose first send starts the
-    /// session on the machine and folder picked last.
+    /// A filtered computer is the destination. From All computers the
+    /// person chooses one explicitly before opening an empty chat.
     func compose() {
         guard canCompose, let navigation = navigationController, navigation.topViewController === self,
               navigation.transitionCoordinator == nil else { return }
-        if let selectedMachineId,
-           let machine = machines.first(where: { $0.machineIds.contains(selectedMachineId) }) {
-            let drafts = NewSessionDraftStore.shared(for: context.account.localSettings)
-            // This explicit computer starts a session. A kept Bot/Task
-            // draft would otherwise reroute it to another capable computer.
-            drafts.setCreatesBot(false)
-            drafts.setCreatesTask(false)
-            if !machine.machineIds.contains(drafts.draft.selectedMachineId ?? "") {
-                drafts.setMachineId(machine.id)
+        if let selectedMachineId {
+            guard let machine = machines.first(where: { $0.machineIds.contains(selectedMachineId) }) else { return }
+            compose(on: machine)
+        } else {
+            let picker = UIAlertController(title: Strings.Home.selectMachine, message: nil, preferredStyle: .actionSheet)
+            for machine in machines {
+                picker.addAction(UIAlertAction(title: machine.name, style: .default) { [weak self] _ in
+                    self?.compose(on: machine)
+                })
             }
+            picker.addAction(UIAlertAction(title: Strings.Common.cancel, style: .cancel))
+            picker.popoverPresentationController?.barButtonItem = toolbarItems?.last
+            picker.popoverPresentationController?.sourceView = bottomBar
+            picker.popoverPresentationController?.sourceRect = bottomBar.bounds
+            present(picker, animated: true)
+        }
+    }
+
+    func compose(on machine: HomeMachineOption) {
+        guard let navigation = navigationController, navigation.topViewController === self,
+              machines.contains(where: { $0.id == machine.id }) else { return }
+        let drafts = NewSessionDraftStore.shared(for: context.account.localSettings)
+        // This explicit computer starts a session. A kept Bot/Task
+        // draft would otherwise reroute it to another capable computer.
+        drafts.setCreatesBot(false)
+        drafts.setCreatesTask(false)
+        if !machine.machineIds.contains(drafts.draft.selectedMachineId ?? "") {
+            drafts.setMachineId(machine.id)
         }
         let chat = LegacyChatViewController(context: context, session: session, sessionId: ComposeChat.makeId())
         // The keyboard first, then the push in its frame (`KeyboardPush`).
