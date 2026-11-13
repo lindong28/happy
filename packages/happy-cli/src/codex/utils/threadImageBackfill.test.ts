@@ -32,6 +32,22 @@ afterEach(async () => {
 });
 
 describe('buildCodexThreadBackfillEnvelopes', () => {
+    it.each(['inProgress', 'completed'] as const)('shows async answers without changing native input (%s)', async status => {
+        const text = '<send_user_message_question_reply>\n' + JSON.stringify([
+            { questionItemId: '["request_user_input_async","call",0]', question: 'Which device?', answer: 'Mac' },
+            { questionItemId: '["request_user_input_async","call",1]', question: 'Details?', answer: 'a < b\nsecond line' },
+        ]) + '\n</send_user_message_question_reply>';
+        const item = { id: 'reply', type: 'userMessage' as const, content: [{ type: 'text' as const, text }] };
+        const envelopes = await buildCodexThreadBackfillEnvelopes({
+            thread: { turns: [{ id: 'turn', status, items: [item] }] },
+            uploadLocalImage: vi.fn(),
+        });
+        expect(envelopes.find(envelope => envelope.role === 'user')?.ev).toEqual({
+            t: 'text', text: 'Which device?\nMac\n\nDetails?\na < b\nsecond line',
+        });
+        expect(item.content[0].text).toBe(text);
+    });
+
     it('inserts uploaded local image file envelopes before the matching user text', async () => {
         const imagePath = await makePngFile('input.png');
         const uploadLocalImage = vi.fn(async (_attachment, opts) => createEnvelope('user', {

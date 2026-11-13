@@ -70,3 +70,29 @@ export function asyncQuestionReply(questions: Question[], answers: QuestionAnswe
         answer: native.answers[question.id].answers.join('\n'),
     })))}\n</send_user_message_question_reply>`;
 }
+
+/** Render our reply envelope for chat only; preserve unknown input verbatim. */
+export function displayAsyncQuestionReply(text: string): string {
+    const start = '<send_user_message_question_reply>';
+    const end = '</send_user_message_question_reply>';
+    if (!text.startsWith(start) || !text.endsWith(end)) return text;
+    try {
+        const replies: unknown = JSON.parse(text.slice(start.length, -end.length));
+        if (!Array.isArray(replies) || replies.length === 0) return text;
+        const lines: string[] = [];
+        for (const reply of replies) {
+            if (!reply || typeof reply !== 'object'
+                || Object.keys(reply).some(key => !['questionItemId', 'question', 'answer'].includes(key))
+                || typeof reply.questionItemId !== 'string'
+                || typeof reply.question !== 'string' || typeof reply.answer !== 'string') return text;
+            const identity: unknown = JSON.parse(reply.questionItemId);
+            if (!Array.isArray(identity) || identity.length !== 3
+                || identity[0] !== 'request_user_input_async' || typeof identity[1] !== 'string'
+                || !Number.isInteger(identity[2]) || identity[2] < 0) return text;
+            lines.push(`${reply.question}\n${reply.answer}`);
+        }
+        return lines.join('\n\n');
+    } catch {
+        return text;
+    }
+}

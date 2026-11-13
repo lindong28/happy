@@ -11,6 +11,7 @@ import {
 } from '@slopus/happy-wire';
 import type { Thread, ThreadItem, ThreadTurn } from '../codexAppServerTypes';
 import { stripHappySystemBlocks } from '../codexPrompt';
+import { displayAsyncQuestionReply } from '../userQuestions';
 
 export type CodexTurnState = {
     currentTurnId: string | null;
@@ -649,7 +650,7 @@ export function mapCodexThreadItemToSessionEnvelopes(
     switch (item.type) {
         case 'userMessage': {
             const text = textFromInputItems(item.content);
-            const visibleText = text ? visibleCodexMessageText(text) : null;
+            const visibleText = text ? visibleCodexMessageText(displayAsyncQuestionReply(text)) : null;
             return visibleText
                 ? [createEnvelope('user', { t: 'text', text: visibleText }, {
                     id: item.id,

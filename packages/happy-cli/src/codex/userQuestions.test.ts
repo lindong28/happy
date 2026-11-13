@@ -1,8 +1,22 @@
 /** Native question identities and replies must survive the mobile form round trip. */
 import { describe, expect, it } from 'vitest';
-import { asyncQuestionForm, nativeQuestionForm, nativeQuestionAnswers, asyncQuestionReply } from './userQuestions';
+import { asyncQuestionForm, nativeQuestionForm, nativeQuestionAnswers, asyncQuestionReply, displayAsyncQuestionReply } from './userQuestions';
 
 describe('Codex question forms', () => {
+    it.each([
+        'ordinary user input',
+        '<send_user_message_question_reply>broken</send_user_message_question_reply>',
+        '<send_user_message_question_reply>[]</send_user_message_question_reply>',
+        '<send_user_message_question_reply>[{"question":"Q","answer":"A"}]</send_user_message_question_reply>',
+        'Explain <send_user_message_question_reply>[]</send_user_message_question_reply>',
+        ...[
+            { questionItemId: JSON.stringify(['other', 'call', 0]), question: 'Q', answer: 'A' },
+            { questionItemId: JSON.stringify(['request_user_input_async', 'call', 0]), question: 'Q', answer: 'A', unknown: 'preserve me' },
+        ].map(reply => `<send_user_message_question_reply>${JSON.stringify([reply])}</send_user_message_question_reply>`),
+    ])('preserves non-reply or unknown input: %s', text => {
+        expect(displayAsyncQuestionReply(text)).toBe(text);
+    });
+
     const native = [{ id: 'route', header: 'Route', question: 'Which route?', options: [{ label: 'A', description: 'First' }, { label: 'B', description: 'Second' }], isOther: true, isSecret: false }];
 
     it('preserves native question ids, labels and custom answers', () => {
