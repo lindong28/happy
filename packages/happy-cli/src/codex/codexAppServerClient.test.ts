@@ -49,6 +49,21 @@ type MockRpcMessage = {
     result?: any;
 };
 
+describe('native resume history cost', () => {
+    it.each([undefined, '/private/native/b.sock'])('only native transport excludes eager history (%s)', async socket => {
+        const { CodexAppServerClient } = await import('./codexAppServerClient');
+        const client = new CodexAppServerClient(undefined, socket);
+        const request = vi.spyOn(client as any, 'request').mockImplementation(async (_method, params: any) => {
+            // A long history must never be requested as part of native readiness.
+            if (socket && params.excludeTurns !== true) throw new Error('full history exceeded the request deadline');
+            return { thread: { id: 'historical-thread' }, model: 'test' };
+        });
+        await expect(client.resumeThread({ threadId: 'historical-thread' })).resolves.toMatchObject({ threadId: 'historical-thread' });
+        expect(request.mock.calls[0][1]).toMatchObject(socket ? { excludeTurns: true } : { threadId: 'historical-thread' });
+        if (!socket) expect(request.mock.calls[0][1]).not.toHaveProperty('excludeTurns');
+    });
+});
+
 function pushJsonLine(stdout: NodeJS.ReadableStream & { push: (chunk: string) => void }, payload: unknown) {
     stdout.push(JSON.stringify(payload) + '\n');
 }
@@ -119,6 +134,7 @@ describe('CodexAppServerClient sandbox integration', () => {
     beforeEach(() => {
         vi.clearAllMocks();
         vi.unstubAllEnvs();
+        vi.stubEnv('HAPPY_CODEX_PATH', undefined);
         process.env.RUST_LOG = originalRustLog;
         mockExecSync.mockReturnValue('codex-cli 0.153.0');
         mockInitializeSandbox.mockResolvedValue(mockSandboxCleanup);
@@ -255,16 +271,11 @@ describe('CodexAppServerClient sandbox integration', () => {
 
         expect(mockInitializeSandbox).toHaveBeenCalledWith(sandboxConfig, process.cwd());
         expect(mockWrapForMcpTransport).toHaveBeenCalledWith('codex', ['app-server', '--listen', 'stdio://']);
-        expect(mockSpawn).toHaveBeenCalledWith(
-            'sh',
-            ['-c', 'wrapped codex app-server'],
-            expect.objectContaining({
-                env: expect.objectContaining({
-                    CODEX_SANDBOX: 'seatbelt',
-                    RUST_LOG: expect.stringContaining('codex_core::rollout::list=off'),
-                }),
-            }),
-        );
+        // Compare only relevant fields: a failed assertion must not dump the
+        // inherited environment (which may contain developer credentials).
+        expect(mockSpawn.mock.calls[0].slice(0, 2)).toEqual(['sh', ['-c', 'wrapped codex app-server']]);
+        expect(mockSpawn.mock.calls[0][2].env.CODEX_SANDBOX).toBe('seatbelt');
+        expect(mockSpawn.mock.calls[0][2].env.RUST_LOG).toContain('codex_core::rollout::list=off');
         expect(client.sandboxEnabled).toBe(true);
 
         await client.disconnect();
@@ -278,15 +289,8 @@ describe('CodexAppServerClient sandbox integration', () => {
         await client.connect();
 
         expect(mockWrapForMcpTransport).not.toHaveBeenCalled();
-        expect(mockSpawn).toHaveBeenCalledWith(
-            'codex',
-            ['app-server', '--listen', 'stdio://'],
-            expect.objectContaining({
-                env: expect.objectContaining({
-                    RUST_LOG: expect.stringContaining('codex_core::rollout::list=off'),
-                }),
-            }),
-        );
+        expect(mockSpawn.mock.calls[0].slice(0, 2)).toEqual(['codex', ['app-server', '--listen', 'stdio://']]);
+        expect(mockSpawn.mock.calls[0][2].env.RUST_LOG).toContain('codex_core::rollout::list=off');
         expect(client.sandboxEnabled).toBe(false);
 
         await client.disconnect();

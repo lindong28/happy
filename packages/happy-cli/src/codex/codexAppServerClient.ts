@@ -36,6 +36,7 @@ import type {
     ThreadGoalClearParams,
     ThreadGoalClearResponse,
     Thread,
+    ThreadTurn,
     InterruptConversationParams,
     ReviewDecision,
     EventMsg,
@@ -914,6 +915,9 @@ export class CodexAppServerClient {
         const defaults = this.threadDefaults ?? {};
         const params: ResumeConversationParams = {
             threadId,
+            // Native readiness must not serialize the entire transcript. The
+            // mobile runner backfills it separately through the paginated API.
+            ...(this.nativeSocketPath ? { excludeTurns: true } : {}),
             model: opts?.model ?? defaults.model ?? null,
             modelProvider: null,
             cwd: opts?.cwd ?? defaults.cwd ?? process.cwd(),
@@ -992,6 +996,15 @@ export class CodexAppServerClient {
             includeTurns: opts.includeTurns ?? true,
         };
         return await this.request('thread/read', params) as ReadConversationResponse;
+    }
+
+    async listThreadTurns(opts: {
+        threadId: string;
+        cursor?: string;
+        sortDirection: 'asc' | 'desc';
+        itemsView: 'notLoaded' | 'full';
+    }): Promise<{ data: ThreadTurn[]; nextCursor: string | null }> {
+        return await this.request('thread/turns/list', { ...opts, limit: 1 }) as { data: ThreadTurn[]; nextCursor: string | null };
     }
 
     async rollbackThread(opts: {

@@ -60,17 +60,27 @@ async function localImagePathToAttachment(
     }
 }
 
+/** Shared across chronological pages so collaboration identities survive paging. */
+export function createCodexBackfillContext() {
+    return {
+        providerSubagentToSessionSubagent: new Map<string, string>(),
+        subagentTitles: new Map<string, string>(),
+        collabReceiverThreadIdsByCall: new Map<string, string[]>(),
+        collabToolByCall: new Map<string, string>(),
+    };
+}
+
 export async function buildCodexThreadBackfillEnvelopes(opts: {
     thread: Pick<Thread, 'turns'>;
     uploadLocalImage: LocalImageUpload;
+    context?: ReturnType<typeof createCodexBackfillContext>;
+    signal?: AbortSignal;
 }): Promise<SessionEnvelope[]> {
     const envelopes: SessionEnvelope[] = [];
-    const providerSubagentToSessionSubagent = new Map<string, string>();
-    const subagentTitles = new Map<string, string>();
-    const collabReceiverThreadIdsByCall = new Map<string, string[]>();
-    const collabToolByCall = new Map<string, string>();
+    const { providerSubagentToSessionSubagent, subagentTitles, collabReceiverThreadIdsByCall, collabToolByCall } = opts.context ?? createCodexBackfillContext();
 
     for (const turn of opts.thread.turns ?? []) {
+        opts.signal?.throwIfAborted();
         const startedAt = turnTimestampMs(turn);
         const completedAt = completedTimestampMs(turn);
         const state = {
@@ -89,9 +99,11 @@ export async function buildCodexThreadBackfillEnvelopes(opts: {
         }));
 
         for (const item of turn.items ?? []) {
+            opts.signal?.throwIfAborted();
             const paths = localImagePaths(item);
             for (let index = 0; index < paths.length; index += 1) {
                 const attachment = await localImagePathToAttachment(paths[index], index + 1);
+                opts.signal?.throwIfAborted();
                 if (!attachment) continue;
                 try {
                     envelopes.push(await opts.uploadLocalImage(attachment, {
@@ -104,6 +116,7 @@ export async function buildCodexThreadBackfillEnvelopes(opts: {
                         errorName: error instanceof Error ? error.name : typeof error,
                     });
                 }
+                opts.signal?.throwIfAborted();
             }
             envelopes.push(...mapCodexThreadItemToSessionEnvelopes(turn, item, {
                 startedAt,

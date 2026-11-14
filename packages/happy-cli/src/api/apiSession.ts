@@ -421,11 +421,12 @@ export class ApiSessionClient extends EventEmitter {
         return this.blobKey;
     }
 
-    private async requestAttachmentUpload(filename: string, size: number): Promise<AttachmentUploadResult> {
+    private async requestAttachmentUpload(filename: string, size: number, signal?: AbortSignal): Promise<AttachmentUploadResult> {
         const response = await axios.post<AttachmentUploadResult>(
             `${configuration.serverUrl}/v1/sessions/${encodeURIComponent(this.sessionId)}/attachments/request-upload`,
             { filename, size },
             {
+                signal,
                 headers: this.authHeaders(),
                 timeout: 30000,
             },
@@ -447,10 +448,11 @@ export class ApiSessionClient extends EventEmitter {
         };
     }
 
-    private async uploadEncryptedAttachmentBlob(upload: AttachmentUploadResult, encrypted: Uint8Array): Promise<void> {
+    private async uploadEncryptedAttachmentBlob(upload: AttachmentUploadResult, encrypted: Uint8Array, signal?: AbortSignal): Promise<void> {
         if (upload.method === 'POST') {
             const { body, boundary } = buildMultipartUploadBody(upload.formFields, encrypted);
             await axios.post(upload.uploadUrl, body, {
+                signal,
                 headers: {
                     'Content-Type': `multipart/form-data; boundary=${boundary}`,
                 },
@@ -468,6 +470,7 @@ export class ApiSessionClient extends EventEmitter {
         }
 
         await axios.put(upload.uploadUrl, Buffer.from(encrypted), {
+            signal,
             headers,
             timeout: 60000,
             maxBodyLength: 10 * 1024 * 1024,
@@ -477,11 +480,16 @@ export class ApiSessionClient extends EventEmitter {
     async uploadLocalImageAttachmentEnvelope(
         attachment: LocalImageAttachment,
         opts: Pick<CreateEnvelopeOptions, 'id' | 'time' | 'claudeUuid' | 'codexItemId'> = {},
+        signal?: AbortSignal,
     ): Promise<SessionEnvelope> {
+        signal?.throwIfAborted();
         const blobKey = await this.getBlobKey();
+        signal?.throwIfAborted();
         const encrypted = encryptBlob(attachment.data, blobKey);
-        const upload = await this.requestAttachmentUpload(attachment.name, encrypted.length);
-        await this.uploadEncryptedAttachmentBlob(upload, encrypted);
+        const upload = await this.requestAttachmentUpload(attachment.name, encrypted.length, signal);
+        signal?.throwIfAborted();
+        await this.uploadEncryptedAttachmentBlob(upload, encrypted, signal);
+        signal?.throwIfAborted();
 
         return createEnvelope('user', {
             t: 'file',
@@ -826,6 +834,30 @@ export class ApiSessionClient extends EventEmitter {
         }
 
         this.enqueueSessionProtocolEnvelope(envelope);
+    }
+
+    /** History is paced by actual delivery, leaving the latest-first outbox free for live messages. */
+    async sendSessionProtocolHistory(envelopes: SessionEnvelope[], signal: AbortSignal): Promise<void> {
+        for (let offset = 0; offset < envelopes.length; offset += ApiSessionClient.MAX_OUTBOX_BATCH_SIZE) {
+            signal.throwIfAborted();
+            if (this.closed) throw new Error('Session closed during history sync');
+            this.enqueueSessionProtocolEnvelopes(envelopes.slice(offset, offset + ApiSessionClient.MAX_OUTBOX_BATCH_SIZE), false);
+            await new Promise<void>((resolve, reject) => {
+                const onAbort = () => finish(signal.reason);
+                const timer = setTimeout(() => finish(new Error('History delivery was not confirmed within 60000ms')), 60_000);
+                const finish = (error?: unknown) => {
+                    clearTimeout(timer);
+                    signal.removeEventListener('abort', onAbort);
+                    if (error) reject(error); else resolve();
+                };
+                signal.addEventListener('abort', onAbort, { once: true });
+                void this.sendSync.invalidateAndAwait().then(() => finish(), finish);
+                if (signal.aborted) onAbort();
+            });
+            // stop() resolves sync waiters too; it is not a delivery receipt.
+            signal.throwIfAborted();
+            if (this.closed) throw new Error('Session closed during history sync');
+        }
     }
 
     /**

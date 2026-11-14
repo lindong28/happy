@@ -155,6 +155,46 @@ describe('ApiSessionClient v3 messages API migration', () => {
         handlers.forEach((handler) => handler(...args));
     };
 
+    it('does not start a blob upload after cancellation while awaiting upload allocation', async () => {
+        const client = new ApiSessionClient('fake-token', session);
+        const controller = new AbortController();
+        let allocated!: (value: unknown) => void;
+        mockAxiosPost.mockImplementationOnce(() => new Promise(resolve => { allocated = resolve; }));
+        const result = client.uploadLocalImageAttachmentEnvelope(
+            { data: new Uint8Array([1]), name: 'image.png', mimeType: 'image/png' }, {}, controller.signal,
+        );
+        const outcome = result.then(() => 'uploaded', () => 'aborted');
+        await waitForCheck(() => expect(mockAxiosPost).toHaveBeenCalledTimes(1));
+        controller.abort();
+        allocated({ data: { ref: 'f', uploadUrl: 'https://server.test/upload', method: 'PUT' } });
+        expect(await outcome).toBe('aborted');
+        expect(mockAxiosPut).not.toHaveBeenCalled();
+        await client.close();
+    });
+
+    it.each(['deliver', 'abort', 'close'] as const)('paces history behind real confirmation and handles %s', async action => {
+        const client = new ApiSessionClient('fake-token', session);
+        const controller = new AbortController();
+        let acknowledge!: (value: unknown) => void;
+        mockAxiosPost.mockImplementationOnce(() => new Promise(resolve => { acknowledge = resolve; }));
+        const envelopes = Array.from({ length: 51 }, (_, i) => ({
+            id: `history-${i}`, time: i, role: 'agent' as const, turn: 'old', ev: { t: 'text' as const, text: 'history' },
+        }));
+        let completed = false;
+        const running = client.sendSessionProtocolHistory(envelopes, controller.signal).then(() => { completed = true; });
+        // Attach the rejection observer before cancellation/close.
+        const outcome = running.then(() => 'delivered', () => 'stopped');
+        await waitForCheck(() => expect(mockAxiosPost).toHaveBeenCalledTimes(1));
+        expect(completed).toBe(false);
+        expect(mockAxiosPost.mock.calls[0][1].messages).toHaveLength(50);
+        if (action === 'abort') controller.abort();
+        if (action === 'close') await client.close();
+        acknowledge({ data: {} });
+        expect(await outcome).toBe(action === 'deliver' ? 'delivered' : 'stopped');
+        expect(mockAxiosPost.mock.calls.flatMap(call => call[1].messages ?? [])).toHaveLength(action === 'deliver' ? 51 : 50);
+        await client.close();
+    });
+
     beforeEach(() => {
         vi.clearAllMocks();
         mockShouldReconnect.mockReturnValue(true);

@@ -47,7 +47,8 @@ import { enqueueCodexUserText, isCodexClearText } from './codexClearCommand';
 import { downloadCodexFileEventAttachment } from './utils/attachmentEvents';
 import { prepareCodexImageInputItems } from './utils/imageInput';
 import { createSerialAsyncHandler } from './utils/serialAsyncHandler';
-import { buildCodexThreadBackfillEnvelopes } from './utils/threadImageBackfill';
+import { buildCodexThreadBackfillEnvelopes, createCodexBackfillContext } from './utils/threadImageBackfill';
+import { syncNativeHistory } from './nativeHistory';
 import {
     buildCodexTurnPrompt,
     hashCodexEnhancedMode,
@@ -453,6 +454,8 @@ export async function runCodex(opts: {
     // Turn cancellation uses client.interruptTurn() — no AbortController hack needed.
     let abortController = new AbortController();
     let shouldExit = false;
+    const nativeHistoryAbort = new AbortController();
+    let nativeHistoryTask: Promise<void> | undefined;
     let terminationPromise: Promise<void> | null = null;
 
     /**
@@ -515,6 +518,7 @@ export async function runCodex(opts: {
     // Await an already-running Stop before the final disconnect as well.
     function terminateSession(): Promise<void> {
         shouldExit = true;
+        nativeHistoryAbort.abort();
         terminationPromise ??= (async () => {
             await handleAbort(false);
             await client?.disconnect();
@@ -1009,19 +1013,60 @@ export async function runCodex(opts: {
         }
 
         if (opts.nativeMobileDirectory) {
+            let historyBoundary: string | null = null;
+            let historyBoundaryError: unknown;
             if (!opts.resumeThreadId) {
                 const started = await client.startThread({ cwd: process.cwd(), mcpServers });
                 nativeLease = await acquireNativeLease(started.threadId, backendPid!, () => { if (!shouldExit) void terminateSession(); });
                 await client.materializeNativeThread();
                 session.updateMetadata(current => ({ ...current, codexThreadId: started.threadId }));
             } else {
-                const { thread } = await client.readThread({ threadId: opts.resumeThreadId, includeTurns: true });
-                for (const turn of thread.turns ?? []) for (const item of turn.items ?? []) if (item.type === 'userMessage') nativeUserItems.add(item.id);
-                const envelopes = await buildCodexThreadBackfillEnvelopes({ thread, uploadLocalImage: (attachment, imageOpts) => session.uploadLocalImageAttachmentEnvelope(attachment, imageOpts) });
-                for (const envelope of envelopes) session.sendSessionProtocolMessage(envelope);
+                try {
+                    // Freeze before the TUI can attach or queued phone input can
+                    // start a new turn. Live turns must never be replayed as history.
+                    const page = await client.listThreadTurns({ threadId: opts.resumeThreadId, sortDirection: 'desc', itemsView: 'notLoaded' });
+                    historyBoundary = page.data[0]?.id ?? null;
+                } catch (error) {
+                    historyBoundaryError = error;
+                }
             }
+            nativeHistoryAbort.signal.throwIfAborted();
             first = false;
             closeNativeFrontend = await publishNativeMobileReady(opts.nativeMobileDirectory, client.threadId!, backendPid!);
+            logger.debug('[Codex native] Live session ready', { threadId: client.threadId });
+            if (opts.resumeThreadId) {
+                const threadId = opts.resumeThreadId;
+                nativeHistoryTask = (async () => {
+                    const startedAt = Date.now();
+                    let publishedTurns = 0;
+                    try {
+                        if (historyBoundaryError) throw historyBoundaryError;
+                        if (historyBoundary === null) return;
+                        session.sendSessionEvent({ type: 'message', message: 'Codex is ready. Earlier messages are syncing to this chat; you can continue working.' });
+                        const context = createCodexBackfillContext();
+                        const turns = await syncNativeHistory({
+                            client, threadId, boundaryId: historyBoundary, signal: nativeHistoryAbort.signal,
+                            publishTurn: async turn => {
+                                for (const item of turn.items ?? []) if (item.type === 'userMessage') nativeUserItems.add(item.id);
+                                const envelopes = await buildCodexThreadBackfillEnvelopes({
+                                    thread: { turns: [turn] }, context, signal: nativeHistoryAbort.signal,
+                                    uploadLocalImage: (attachment, imageOpts) => session.uploadLocalImageAttachmentEnvelope(attachment, imageOpts, nativeHistoryAbort.signal),
+                                });
+                                await session.sendSessionProtocolHistory(envelopes, nativeHistoryAbort.signal);
+                                publishedTurns++;
+                                logger.debug('[Codex native history] Delivered turn', { threadId, publishedTurns, elapsedMs: Date.now() - startedAt });
+                            },
+                        });
+                        nativeHistoryAbort.signal.throwIfAborted();
+                        session.sendSessionEvent({ type: 'message', message: 'Earlier Codex messages have finished syncing to this chat.' });
+                        logger.debug('[Codex native history] Complete', { threadId, turns, elapsedMs: Date.now() - startedAt });
+                    } catch (error) {
+                        if (nativeHistoryAbort.signal.aborted) return;
+                        logger.debug('[Codex native history] Incomplete', { threadId, publishedTurns, elapsedMs: Date.now() - startedAt, error });
+                        session.sendSessionEvent({ type: 'message', message: 'Earlier messages did not finish syncing. Codex can still continue with its original context. Keep working; restart this mobile session later to retry history sync. Details are in the computer’s Happy log.' });
+                    }
+                })();
+            }
         }
 
         const forkCodexThreadId = process.env.HAPPY_FORK_CODEX_THREAD_ID;
@@ -1245,10 +1290,17 @@ export async function runCodex(opts: {
 
     } finally {
         // Clean up resources when main loop exits
+        shouldExit = true;
+        nativeHistoryAbort.abort();
         clearInterval(keepAliveInterval);
         cancelQuestions();
         await closeNativeFrontend?.();
         await terminationPromise;
+        if (nativeHistoryTask) {
+            // Reject an in-flight history RPC before waiting for its owner task.
+            await client.disconnect();
+            await nativeHistoryTask;
+        }
         logger.debug('[codex]: Final cleanup start');
         logActiveHandles('cleanup-start');
 

@@ -13,7 +13,7 @@ vi.mock('@/configuration', () => ({
     configuration: { happyHomeDir: '/home/test/.happy' },
 }));
 
-import { buildCodexThreadBackfillEnvelopes } from './threadImageBackfill';
+import { buildCodexThreadBackfillEnvelopes, createCodexBackfillContext } from './threadImageBackfill';
 
 const tempDirs: string[] = [];
 
@@ -32,6 +32,35 @@ afterEach(async () => {
 });
 
 describe('buildCodexThreadBackfillEnvelopes', () => {
+    it('does not map or upload further items when cancelled during image upload', async () => {
+        const imagePath = await makePngFile('cancel.png');
+        const abort = new AbortController();
+        const upload = vi.fn(async () => {
+            abort.abort();
+            return createEnvelope('user', { t: 'text', text: 'uploaded' });
+        });
+        await expect(buildCodexThreadBackfillEnvelopes({
+            thread: { turns: [{ id: 'old', items: [
+                { type: 'userMessage', id: 'a', content: [{ type: 'localImage', path: imagePath }] },
+                { type: 'userMessage', id: 'b', content: [{ type: 'localImage', path: imagePath }] },
+            ] }] }, uploadLocalImage: upload, signal: abort.signal,
+        })).rejects.toThrow();
+        expect(upload).toHaveBeenCalledTimes(1);
+    });
+
+    it('keeps cross-turn collaboration context when history arrives in separate pages', async () => {
+        const context = createCodexBackfillContext();
+        const sessionSubagent = 'abcdefghijklmnopqrstuvwx';
+        context.subagentTitles.set(sessionSubagent, 'Existing title');
+        context.providerSubagentToSessionSubagent.set('child', sessionSubagent);
+        const input = { id: 'later', status: 'completed', items: [{
+            type: 'subAgentActivity', id: 'child-update', kind: 'started', agentThreadId: 'child',
+        }] };
+        const withContext = await buildCodexThreadBackfillEnvelopes({ thread: { turns: [input] }, context, uploadLocalImage: vi.fn() });
+        const withoutContext = await buildCodexThreadBackfillEnvelopes({ thread: { turns: [input] }, uploadLocalImage: vi.fn() });
+        expect(JSON.stringify(withContext)).toContain(sessionSubagent);
+        expect(JSON.stringify(withoutContext)).not.toContain(sessionSubagent);
+    });
     it.each(['inProgress', 'completed'] as const)('shows async answers without changing native input (%s)', async status => {
         const text = '<send_user_message_question_reply>\n' + JSON.stringify([
             { questionItemId: '["request_user_input_async","call",0]', question: 'Which device?', answer: 'Mac' },
