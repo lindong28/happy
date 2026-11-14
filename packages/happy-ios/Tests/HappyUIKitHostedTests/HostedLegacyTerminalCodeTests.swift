@@ -202,15 +202,14 @@ final class HostedLegacyTerminalCodeTests: XCTestCase {
         }
 
         // Named after the first computer paired with it, once that turns
-        // up; Happy CLI until then, as every Happy account on the relay is,
-        // never "Legacy Account", "Agent" or "Happy account".
+        // up; until then Settings uses the friendly connection name.
         let page = settings ?? {
             let page = SettingsViewController(context: context, computer: nil)
             navigation.pushViewController(page, animated: false)
             page.view.layoutIfNeeded()
             return page
         }()
-        XCTAssertEqual(title(of: newID, in: page), "Happy CLI", "\(here)")
+        XCTAssertEqual(title(of: newID, in: page), Strings.ComputerFilter.myComputers, "\(here)")
         try session.store.upsertMachine(MachineRecord(id: "mac", seq: 0, createdAt: 1, updatedAt: 1, active: true, activeAt: 1,
             metadataVersion: 1, metadataCipher: "c", metadata: .object(["host": .string("mbp.local"), "displayName": .string("Steve’s MacBook")]),
             daemonStateVersion: 0, daemonStateCipher: nil, daemonState: nil, dataKeyCipher: "k", decryptable: true))
@@ -218,7 +217,7 @@ final class HostedLegacyTerminalCodeTests: XCTestCase {
         XCTAssertTrue(named, "\(here): still \(String(describing: title(of: newID, in: page)))")
         XCTAssertEqual(account.accounts.first { $0.id == newID }?.shownName, "Steve’s MacBook")
         for old in before where !old.isAgentConnection && old.resolvedName == nil {
-            XCTAssertEqual(title(of: old.id, in: page), "Happy CLI", "\(here)")
+            XCTAssertEqual(title(of: old.id, in: page), Strings.ComputerFilter.myComputers, "\(here)")
         }
 
         // Its Backup & Restore offers no key to show and no device to
