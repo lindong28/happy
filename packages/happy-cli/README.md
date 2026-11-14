@@ -52,6 +52,8 @@ happy acp -- custom-agent --flag
 
 ### Codex 手机接续：开发分支验证状态
 
+原生手机模式恢复同一 UUID 时，后台须先取得该会话的独占锁。若普通 Codex 会话仍在运行，先在原终端退出，再执行 `codex-account resume UUID --account NAME --mobile`；不要删除锁文件或同时启动第二个执行器。出现 `Native mobile startup failed` 时，查看错误指向的 `worker.log`：账号适配器的锁冲突详情会保留在该日志，JSON 就绪协议保持独立。仅有 `Native session lease unavailable (exit 2)` 不能区分锁冲突与适配器其他错误，旧日志中已丢弃的详情无法补回。
+
 本开发分支正在补齐 Codex 原生提问与 Happy 表单之间的转接，并为终端增加文本输入。`Enter` 提交、`Ctrl-U` 清空草稿；手机与终端的普通输入进入同一 Happy 会话队列。这里的终端界面不是完整的 Codex TUI。
 
 同步提问通过 `item/tool/requestUserInput` 回答；异步提问使用 Codex 的 `send_user_message_question_reply` 包装，绑定原线程。明确被拒绝的答复可以重试；送达结果未知时不会自动重发。原生请求撤回、清空上下文和取消时会撤销相应待答控件。秘密输入不使用普通手机表单。

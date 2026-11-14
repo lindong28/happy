@@ -23,8 +23,9 @@ export async function acquireNativeLease(threadId: string, backendPid: number, o
     if (!entry) throw new Error('Native mobile requires the updated codex-account launcher');
     const child = spawn(entry, ['_mobile-lease', threadId, String(backendPid)], { stdio: ['pipe', 'pipe', 'pipe'], detached: true });
     const lines = createInterface({ input: child.stdout! });
-    // The CLI reports details to its own log; do not include account or process output in protocol messages.
-    child.stderr?.resume();
+    // Preserve adapter diagnostics in worker.log, separate from the JSON readiness
+    // protocol. Draining this stream silently loses the underlying lock error.
+    child.stderr?.pipe(process.stderr, { end: false });
     try {
         await new Promise<void>((resolveReady, reject) => {
             const timer = setTimeout(() => reject(new Error('Native session lease did not become ready')), 10_000);
