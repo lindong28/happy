@@ -105,6 +105,38 @@ describe('native chat continuity', () => {
         expect(unseenNativeHistory(backfill, [])).toEqual(backfill);
     });
 
+    it.each([[0, false], [400, false], [400, true]])('captures a legacy boundary without traversing old pages (%i messages, reordered %s)', async (count, reordered) => {
+        const previousUrl = configuration.serverUrl;
+        const requested: string[] = [];
+        const body = { role: 'user', content: { type: 'text', text: 'old pending input' } };
+        const content = { t: 'encrypted', c: encodeBase64(encrypt(new Uint8Array(32).fill(3), 'legacy', body)) };
+        const server = createServer((req, res) => {
+            requested.push(req.url!);
+            const latest = req.url!.startsWith('/v1/');
+            const candidate = count - (reordered ? 1 : 0);
+            const after = Number(new URL(req.url!, 'http://fixture').searchParams.get('after_seq') ?? 0);
+            const messages = latest
+                ? Array.from({ length: Math.min(candidate, 150) }, (_, i) => ({ seq: candidate - i, content }))
+                : Array.from({ length: Math.min(count - after, 100) }, (_, i) => ({ seq: after + i + 1, content }));
+            res.setHeader('Content-Type', 'application/json');
+            res.end(JSON.stringify({ messages, hasMore: !latest && after + messages.length < count }));
+        });
+        await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+        Object.defineProperty(configuration, 'serverUrl', { value: `http://127.0.0.1:${(server.address() as AddressInfo).port}` });
+        try {
+            const state = chat();
+            state.legacyPending = true;
+            const result = await readNativeChatHistory(state, credentials);
+            expect(result.seq).toBe(count);
+            expect(requested).toEqual(['/v1/sessions/original-chat/messages', `/v3/sessions/original-chat/messages?after_seq=${count - (reordered ? 1 : 0)}&limit=100`]);
+            expect(state.inputSeq).toBe(0);
+            expect(state.legacyPending).toBe(true);
+        } finally {
+            Object.defineProperty(configuration, 'serverUrl', { value: previousUrl });
+            await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
+        }
+    });
+
     it('reads paginated encrypted history but does not consume phone input; errors retain the checkpoint', async () => {
         const previousUrl = configuration.serverUrl;
         const requested: string[] = [];

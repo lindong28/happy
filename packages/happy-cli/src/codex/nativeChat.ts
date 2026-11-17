@@ -10,6 +10,7 @@ import { decodeBase64, decrypt, encodeBase64 } from '@/api/encryption';
 import type { Metadata, Session } from '@/api/types';
 import type { Credentials } from '@/persistence';
 import { readPersistedSessions } from '@/persistence';
+import { logger } from '@/ui/logger';
 
 const uuid = z.string().uuid();
 const seq = z.number().int().nonnegative();
@@ -95,14 +96,19 @@ export async function readNativeChatHistory(chat: NativeChat, credentials: Crede
     let afterSeq = chat.historySeq;
     const envelopes: SessionEnvelope[] = [];
     const deadline = Date.now() + 60_000;
+    // Migration needs the cancellation boundary, not all old display history.
+    // Start with v1's latest 150 messages, then confirm with seq-ordered v3:
+    // createdAt order alone cannot prove that the maximum seq was included.
+    let latestPage = chat.legacyPending;
+    let pages = 0;
     while (true) {
         signal?.throwIfAborted();
         const remaining = deadline - Date.now();
         if (remaining <= 0) throw new Error('Native chat history snapshot exceeded 60000ms; retry the same resume command.');
         const response = await axios.get<{
             messages: { seq: number; content: { t: string; c: string } }[]; hasMore: boolean;
-        }>(`${configuration.serverUrl}/v3/sessions/${encodeURIComponent(chat.sessionId)}/messages`, {
-            params: { after_seq: afterSeq, limit: 100 },
+        }>(`${configuration.serverUrl}/${latestPage ? 'v1' : 'v3'}/sessions/${encodeURIComponent(chat.sessionId)}/messages`, {
+            params: latestPage ? undefined : { after_seq: afterSeq, limit: 100 },
             headers: { Authorization: `Bearer ${credentials.token}` }, timeout: remaining, signal,
         });
         const previous = afterSeq;
@@ -113,6 +119,9 @@ export async function readNativeChatHistory(chat: NativeChat, credentials: Crede
             if (!body) throw new Error('Could not decrypt original native chat; refusing to replay input.');
             if (body.role === 'session' && body.content?.ev) envelopes.push(body.content);
         }
+        pages++;
+        logger.debug('[Codex native chat] History snapshot page', { latestPage, pages, messages: response.data.messages.length, seq: afterSeq });
+        if (latestPage) { latestPage = false; continue; }
         if (!response.data.hasMore) return { seq: afterSeq, envelopes };
         if (afterSeq <= previous) throw new Error('Native chat history pagination did not advance');
     }
