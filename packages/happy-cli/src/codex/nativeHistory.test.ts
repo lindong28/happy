@@ -56,4 +56,29 @@ describe('native history boundary and lifetime', () => {
             })).rejects.toThrow(/history/);
         }
     });
+    it('only reads newer turns after confirmed delivery and includes standalone CLI work', async () => {
+        const published: string[] = [];
+        const requested: string[] = [];
+        const result = await syncNativeHistory({
+            threadId: 't', afterTurnId: 'delivered', boundaryId: 'standalone', signal: new AbortController().signal,
+            client: { listThreadTurns: async opts => {
+                requested.push(opts.sortDirection!);
+                return { data: [turn('live'), turn('standalone'), turn('phone'), turn('delivered'), turn('ancient')], nextCursor: 'older' };
+            } },
+            publishTurn: async value => { published.push(value.id); },
+        });
+        expect(result).toBe(2);
+        expect(published).toEqual(['phone', 'standalone']);
+        expect(requested).toEqual(['desc']);
+    });
+
+    it('does not mark history delivered when publishing fails, so the same boundary is retryable', async () => {
+        const opts = { threadId: 't', boundaryId: 'last', afterTurnId: 'done', signal: new AbortController().signal,
+            client: { listThreadTurns: async () => ({ data: [turn('last'), turn('done')], nextCursor: null }) } };
+        await expect(syncNativeHistory({ ...opts, publishTurn: async () => { throw new Error('delivery failed'); } })).rejects.toThrow('delivery failed');
+        const delivered: string[] = [];
+        await expect(syncNativeHistory({ ...opts, publishTurn: async value => { delivered.push(value.id); } })).resolves.toBe(1);
+        expect(delivered).toEqual(['last']);
+    });
+
 });

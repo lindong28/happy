@@ -15,6 +15,8 @@ function harness() {
         process: { stdin: PassThrough };
         _threadId: string;
         _turnId: string;
+        pendingInterrupt: Promise<void> | null;
+        handleLine(line: string): void;
         pendingTurnCompletion: { turnId: string; resolve(aborted: boolean): void } | null;
         handleServerRequest(id: number, method: string, params: unknown): Promise<void>;
         handleNotification(method: string, params: unknown): void;
@@ -25,6 +27,40 @@ function harness() {
 }
 
 describe('Codex peer lifecycle', () => {
+    it('does not consume input while an earlier interrupt is pending or after shutdown before dispatch', async () => {
+        const { client, dispatcher, output } = harness();
+        let release!: () => void;
+        dispatcher.pendingInterrupt = new Promise<void>(resolve => { release = resolve; });
+        let consumed = false;
+        let stopping = false;
+        const sending = client.sendTurnAndWait('queued', { beforeSend: () => {
+            if (stopping) throw new Error('stopped before submission');
+            consumed = true;
+        } });
+        expect(consumed).toBe(false);
+        expect(output).toEqual([]);
+        stopping = true;
+        release();
+        await expect(sending).rejects.toThrow('stopped before submission');
+        expect(consumed).toBe(false);
+        expect(output).toEqual([]);
+    });
+
+    it('records attempted input immediately before sending and retains its receipt if the request fails', async () => {
+        const { client, dispatcher, output } = harness();
+        let consumed = false;
+        const sending = client.sendTurnAndWait('queued', { beforeSend: () => {
+            expect(output).toEqual([]);
+            consumed = true;
+        } });
+        expect(consumed).toBe(true);
+        const request = JSON.parse(output[0]) as { id: number; method: string };
+        expect(request.method).toBe('turn/start');
+        dispatcher.handleLine(JSON.stringify({ id: request.id, error: { code: -32000, message: 'connection outcome unknown' } }));
+        await expect(sending).rejects.toThrow();
+        expect(consumed).toBe(true);
+    });
+
     it('forwards completed native user messages with identity and attachments', () => {
         const { client, dispatcher } = harness();
         const events: unknown[] = [];

@@ -1,3 +1,4 @@
+import { prepareNativeResumeLaunch } from '@/resume/nativeResume';
 import fs from 'fs/promises';
 import os from 'os';
 import * as tmp from 'tmp';
@@ -831,10 +832,10 @@ export async function startDaemon(): Promise<void> {
           }
         }
 
-        const launch = buildResumeLaunch(
+        const launch = await prepareNativeResumeLaunch(buildResumeLaunch(
           { id: happySessionId, active: true, metadata },
           { startedBy: 'daemon', claudeStartingMode: 'remote' },
-        );
+        ), happySessionId);
 
         const nativeCodex = metadata.flavor === 'codex' && metadata.codexNativeConfig === true;
         if (!nativeCodex && options?.model) {

@@ -1,3 +1,4 @@
+import { prepareNativeResumeLaunch } from './nativeResume';
 import { existsSync } from 'node:fs';
 import { codexAccountName } from '@/codex/accountBridge';
 
@@ -166,7 +167,7 @@ export async function handleResumeCommand(args: string[]): Promise<void> {
     }
 
     if (reconnectableSession) {
-        const launch = buildResumeLaunch(reconnectableSession);
+        const launch = await prepareNativeResumeLaunch(buildResumeLaunch(reconnectableSession), reconnectableSession.id);
 
         if (!existsSync(launch.cwd)) {
             throw new Error(`Saved session path does not exist: ${launch.cwd}`);
@@ -183,7 +184,7 @@ export async function handleResumeCommand(args: string[]): Promise<void> {
     if (!session) {
         throw localError;
     }
-    const launch = buildResumeLaunch(session);
+    const launch = await prepareNativeResumeLaunch(buildResumeLaunch(session), session.id);
 
     if (!existsSync(launch.cwd)) {
         throw new Error(`Saved session path does not exist: ${launch.cwd}`);

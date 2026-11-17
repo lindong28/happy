@@ -47,7 +47,8 @@ function harness(preparation: boolean, slowCleanup: boolean, native = false) {
             if (preparation) { await this.sendTurn(); return { aborted: false }; }
             return super.sendTurnAndWait(...args);
         }
-        async resumeThread() { events.push('resume'); }
+        async resumeThread() { events.push('resume'); this.emitThreadName('thread', 'Existing Codex title'); return { threadId: 'thread', model: 'test' }; }
+        async listThreadTurns() { return { data: [], nextCursor: null }; }
         async interruptTurn() {}
         // Exercise the timeout outcome without waiting three wall-clock seconds.
         async waitForTurnCompletion() { return false; }
@@ -69,7 +70,7 @@ function harness(preparation: boolean, slowCleanup: boolean, native = false) {
     }
     let metadata: any = { path: '/mock', host: 'test' };
     const session = {
-        sessionId: 's', rpcHandlerManager: { registerHandler: noop }, onFileEvent: noop, onUserMessage: noop,
+        resumeNativeInput: noop, sessionId: 's', rpcHandlerManager: { registerHandler: noop }, onFileEvent: noop, onUserMessage: noop,
         updateAgentState: noop, updateMetadata: (update: any) => { metadata = update(metadata); }, keepAlive: noop, sendSessionEvent: noop,
         sendSessionDeath: () => events.push('death'), flush: async () => {},
         close: async () => { events.push('close'); }, getMetadata: () => ({}),
@@ -91,6 +92,9 @@ function harness(preparation: boolean, slowCleanup: boolean, native = false) {
         isCodexClearText: () => false, parseCodexGoalCommand: () => null, resolveCodexExecutionPolicy: () => ({}),
         acquireNativeLease: async () => ({ stdin: { end: noop } }),
         publishNativeMobileReady: async () => noop,
+        readNativeChat: () => null, createNativeChat: () => ({ inputSeq: 0 }), writeNativeChat: noop,
+        nativePhoneInputId: () => 'happy-native:s:input',
+        resumeExistingThread: async ({ client }: any) => client.resumeThread(),
         prepareCodexImageInputItems: async () => {
             prepared.resolve();
             if (preparation) await releasePrepare.promise;

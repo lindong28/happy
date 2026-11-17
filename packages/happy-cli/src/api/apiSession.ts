@@ -242,6 +242,17 @@ export class ApiSessionClient extends EventEmitter {
      * fetch's after_seq looked straight past seq 1.
      */
     private lastReceivedSeq = 0;
+    private readonly inputSequences = new WeakMap<UserMessage, number>();
+    private stableEnvelopeIds = false;
+
+    resumeNativeInput(afterSeq: number) {
+        this.lastReceivedSeq = afterSeq;
+        this.stableEnvelopeIds = true;
+    }
+
+    userMessageSeq(message: UserMessage): number | undefined {
+        return this.inputSequences.get(message);
+    }
     private pendingOutbox: Array<{ content: string; localId: string }> = [];
     private readonly sendSync: InvalidateSync;
     private readonly receiveSync: InvalidateSync;
@@ -346,7 +357,7 @@ export class ApiSessionClient extends EventEmitter {
                             ? (body as { content: { type: string } }).content.type
                             : 'unknown',
                     });
-                    this.routeIncomingMessage(body);
+                    this.routeIncomingMessage(body, messageSeq);
                     this.lastReceivedSeq = messageSeq;
                 } else if (data.body.t === 'update-session') {
                     if (data.body.metadata && data.body.metadata.version > this.metadataVersion) {
@@ -579,9 +590,10 @@ export class ApiSessionClient extends EventEmitter {
         };
     }
 
-    private routeIncomingMessage(message: unknown) {
+    private routeIncomingMessage(message: unknown, seq?: number) {
         const userResult = UserMessageSchema.safeParse(message);
         if (userResult.success) {
+            if (seq !== undefined) this.inputSequences.set(userResult.data, seq);
             if (this.pendingMessageCallback) {
                 this.pendingMessageCallback(userResult.data);
             } else {
@@ -647,7 +659,7 @@ export class ApiSessionClient extends EventEmitter {
 
                 try {
                     const body = decrypt(this.encryptionKey, this.encryptionVariant, decodeBase64(message.content.c));
-                    this.routeIncomingMessage(body);
+                    this.routeIncomingMessage(body, message.seq);
                 } catch (error) {
                     logger.debug('[API] Failed to decrypt fetched message', {
                         sessionId: this.sessionId,
@@ -704,11 +716,11 @@ export class ApiSessionClient extends EventEmitter {
         }
     }
 
-    private enqueueMessage(content: unknown, invalidate: boolean = true) {
+    private enqueueMessage(content: unknown, invalidate: boolean = true, localId?: string) {
         const encrypted = encodeBase64(encrypt(this.encryptionKey, this.encryptionVariant, content));
         this.pendingOutbox.push({
             content: encrypted,
-            localId: randomUUID()
+            localId: localId ?? randomUUID()
         });
         if (invalidate) {
             this.sendSync.invalidate();
@@ -819,7 +831,7 @@ export class ApiSessionClient extends EventEmitter {
             }
         };
 
-        this.enqueueMessage(content, invalidate);
+        this.enqueueMessage(content, invalidate, this.stableEnvelopeIds ? `native:${envelope.id}` : undefined);
     }
 
     sendSessionProtocolMessage(envelope: SessionEnvelope) {

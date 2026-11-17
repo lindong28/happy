@@ -5,6 +5,7 @@ import { hashObject } from '@/utils/deterministicJson';
 import type { ReasoningEffort } from './codexAppServerTypes';
 
 export interface CodexEnhancedMode {
+    receivedSeq?: number;
     permissionMode: PermissionMode;
     model?: string;
     /** Happy app instructions appended to the first Codex prompt for option chips. */

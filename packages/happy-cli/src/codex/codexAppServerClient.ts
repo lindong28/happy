@@ -1188,6 +1188,7 @@ export class CodexAppServerClient {
      */
     async sendTurn(prompt: string, opts?: {
         clientUserMessageId?: string;
+        beforeSend?: () => void;
         model?: string;
         cwd?: string;
         approvalPolicy?: ApprovalPolicy;
@@ -1235,7 +1236,7 @@ export class CodexAppServerClient {
         // turn/start returns immediately; turn completes via events.
         // We don't await completion here — the caller's event handler
         // tracks task_complete / turn_aborted.
-        const result = await this.request('turn/start', params) as { turn?: { id?: string | null } };
+        const result = await this.request('turn/start', params, undefined, opts?.beforeSend) as { turn?: { id?: string | null } };
         const turnId = result?.turn?.id;
         if (typeof turnId === 'string' && turnId.length > 0) {
             if (!this.nativeEarlyCompletions.has(turnId)) this._turnId = turnId;
@@ -1254,6 +1255,7 @@ export class CodexAppServerClient {
      */
     async sendTurnAndWait(prompt: string, opts?: {
         clientUserMessageId?: string;
+        beforeSend?: () => void;
         model?: string;
         cwd?: string;
         approvalPolicy?: ApprovalPolicy;
@@ -1371,13 +1373,16 @@ export class CodexAppServerClient {
     /** Default timeout for RPC requests (ms). */
     private static readonly REQUEST_TIMEOUT_MS = 30_000;
 
-    private request(method: string, params?: unknown, timeoutMs?: number): Promise<unknown> {
+    private request(method: string, params?: unknown, timeoutMs?: number, beforeSend?: () => void): Promise<unknown> {
         const timeout = timeoutMs ?? CodexAppServerClient.REQUEST_TIMEOUT_MS;
         return new Promise((resolve, reject) => {
             if (!this.transportWritable()) {
                 reject(new Error(`Cannot send ${method}: stdin not writable`));
                 return;
             }
+            // No async preparation or transport availability checks remain after
+            // this hook. An attempted dispatch is not automatically replayable.
+            beforeSend?.();
             const id = this.nextId++;
 
             const timer = setTimeout(() => {

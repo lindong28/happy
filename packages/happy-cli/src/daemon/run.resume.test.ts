@@ -33,7 +33,9 @@ vi.mock('@/utils/spawnHappyCLI', () => ({ spawnHappyCLI: mocks.spawn }));
 vi.mock('@/utils/tmux', () => ({ isTmuxAvailable: async () => false }));
 vi.mock('@/resume/localHappyAgentAuth', () => ({ detectResumeSupport: () => ({}), hasLocalHappyAgentAuth: () => false }));
 vi.mock('./happyTerminalBoot', () => ({ startHappyTerminalDaemon: vi.fn() }));
+vi.mock('@/codex/nativeChat', () => ({ readNativeChat: () => null }));
 vi.mock('@/persistence', () => ({
+  readCredentials: async () => ({ token: 'test-token' }),
   readPersistedSessions: () => mocks.persisted,
   persistSession: mocks.persistSession, markSessionStopped: vi.fn(), writeDaemonState: vi.fn(), readDaemonState: vi.fn(),
   acquireDaemonLock: async () => ({}), releaseDaemonLock: vi.fn(),

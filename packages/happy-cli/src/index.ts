@@ -34,6 +34,7 @@ import { extractNoSandboxFlag } from './utils/sandboxFlags'
 import { handleResumeCommand } from '@/resume/handleResumeCommand'
 import { ensureDaemonRunning } from './daemon/ensureDaemonRunning'
 import { handleCodexCommand } from './commands/codexCommand'
+import { handleNativeSessionCommand } from './commands/nativeSession'
 import { sanitizeSessionEnvironment } from './daemon/sessionEnvironment'
 
 
@@ -52,7 +53,9 @@ import { sanitizeSessionEnvironment } from './daemon/sessionEnvironment'
   if (!args.includes('--version')) {
   }
 
-  if (subcommand === 'doctor') {
+  if (subcommand === 'native-session') {
+    await handleNativeSessionCommand(args.slice(1))
+  } else if (subcommand === 'doctor') {
     // Check for clean subcommand
     if (args[1] === 'clean') {
       if (args.slice(2).some(a => a === '--help' || a === '-h')) {

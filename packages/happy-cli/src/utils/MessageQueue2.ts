@@ -21,6 +21,9 @@ export class MessageQueue2<T> {
     private closed = false;
     private onMessageHandler: ((message: string, mode: T) => void) | null = null;
     modeHasher: (mode: T) => string;
+    private readonly batchModes = new WeakMap<object, T[]>();
+
+    consumedModes(batch: object): readonly T[] { return this.batchModes.get(batch) ?? []; }
 
     constructor(
         modeHasher: (mode: T) => string,
@@ -295,6 +298,7 @@ export class MessageQueue2<T> {
 
         const firstItem = this.queue[0];
         const sameModeMessages: string[] = [];
+        const consumedModes: T[] = [];
         const collectedAttachments: PendingAttachment[] = [];
         let mode = firstItem.mode;
         let isolate = firstItem.isolate ?? false;
@@ -304,6 +308,7 @@ export class MessageQueue2<T> {
         if (firstItem.isolate) {
             const item = this.queue.shift()!;
             sameModeMessages.push(item.message);
+            consumedModes.push(item.mode);
             if (item.attachments) collectedAttachments.push(...item.attachments);
             logger.debug(`[MessageQueue2] Collected isolated message with mode hash: ${targetModeHash}`);
         } else {
@@ -313,6 +318,7 @@ export class MessageQueue2<T> {
                 !this.queue[0].isolate) {
                 const item = this.queue.shift()!;
                 sameModeMessages.push(item.message);
+            consumedModes.push(item.mode);
                 if (item.attachments) collectedAttachments.push(...item.attachments);
             }
             logger.debug(`[MessageQueue2] Collected batch of ${sameModeMessages.length} messages with mode hash: ${targetModeHash}`);
@@ -321,13 +327,15 @@ export class MessageQueue2<T> {
         // Join all messages with newlines
         const combinedMessage = sameModeMessages.join('\n');
 
-        return {
+        const batch = {
             message: combinedMessage,
             mode,
             hash: targetModeHash,
             isolate,
             attachments: collectedAttachments.length > 0 ? collectedAttachments : undefined,
         };
+        this.batchModes.set(batch, consumedModes);
+        return batch;
     }
 
     /**

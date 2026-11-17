@@ -49,6 +49,7 @@ import { prepareCodexImageInputItems } from './utils/imageInput';
 import { createSerialAsyncHandler } from './utils/serialAsyncHandler';
 import { buildCodexThreadBackfillEnvelopes, createCodexBackfillContext } from './utils/threadImageBackfill';
 import { syncNativeHistory } from './nativeHistory';
+import { createNativeChat, isNativePhoneInput, nativePhoneInputId, readNativeChat, readNativeChatHistory, unseenNativeHistory, writeNativeChat, type NativeChat } from './nativeChat';
 import {
     buildCodexTurnPrompt,
     hashCodexEnhancedMode,
@@ -99,7 +100,7 @@ const DEFAULT_CODEX_PERMISSION_MODE: PermissionMode = 'auto';
 /**
  * Main entry point for the codex command with ink UI
  */
-export async function runCodex(opts: {
+type RunCodexOptions = {
     credentials: Credentials;
     startedBy?: 'daemon' | 'terminal';
     noSandbox?: boolean;
@@ -109,7 +110,31 @@ export async function runCodex(opts: {
     permissionMode?: PermissionMode;
     model?: string;
     effort?: ReasoningEffort;
-}): Promise<void> {
+};
+
+export async function runCodex(opts: RunCodexOptions): Promise<void> {
+    if (!opts.nativeMobileDirectory) return runCodexSession(opts);
+    if (!opts.nativeConfig || opts.noSandbox || opts.model !== undefined || opts.effort !== undefined || opts.permissionMode !== undefined) throw new Error('Native mobile requires unmodified local Codex configuration.');
+    const settings = await readSettings();
+    if (settings?.sandboxConfig?.enabled) throw new Error('Native configuration conflicts with the enabled Happy sandbox.');
+    const client = new CodexAppServerClient(undefined, join(opts.nativeMobileDirectory, 'b.sock'));
+    let lease: ChildProcess | undefined;
+    try {
+        // The UUID lease protects relay identity and input as well as the backend.
+        // No Happy session is connected or mutated before it is held.
+        await client.connect();
+        const backendPid = await client.nativeBackendPid();
+        const threadId = opts.resumeThreadId ?? (await client.startThread({ cwd: process.cwd() })).threadId;
+        lease = await acquireNativeLease(threadId, backendPid, () => { void client.disconnect(); });
+        if (!opts.resumeThreadId) await client.materializeNativeThread();
+        await runCodexSession({ ...opts, resumeThreadId: threadId }, { client, backendPid });
+    } finally {
+        await client.disconnect();
+        lease?.stdin?.end();
+    }
+}
+
+async function runCodexSession(opts: RunCodexOptions, native?: { client: CodexAppServerClient; backendPid: number }): Promise<void> {
     if (opts.nativeConfig && (opts.noSandbox || opts.model !== undefined || opts.effort !== undefined || opts.permissionMode !== undefined)) {
         throw new Error('Native configuration cannot be combined with Happy model, effort, permission or sandbox overrides.');
     }
@@ -195,10 +220,25 @@ export async function runCodex(opts: {
         metadata.slashCommands = Array.from(new Set([...(metadata.slashCommands ?? []), ...skillCommands]));
     }
 
+    let nativeChat: NativeChat | null = native && opts.resumeThreadId ? readNativeChat(opts.resumeThreadId, opts.credentials) : null;
+    if (native && !nativeChat && process.env.HAPPY_RECONNECT_SESSION_ID) throw new Error('This legacy chat must first be migrated with codex-account --mobile before automatic resume.');
+    if (nativeChat && nativeChat.cwd !== process.cwd()) throw new Error('Native chat working directory changed; refusing to move the original chat.');
+    let nativeHistorySnapshot: Awaited<ReturnType<typeof readNativeChatHistory>> | undefined;
+    if (nativeChat?.legacyPending) {
+        // The old backend lease is released before this snapshot. Old inputs
+        // cannot race across the migration boundary and execute twice.
+        nativeHistorySnapshot = await readNativeChatHistory(nativeChat, opts.credentials);
+        nativeChat.inputSeq = nativeHistorySnapshot.seq;
+        nativeChat.legacyPending = false;
+        writeNativeChat(nativeChat);
+    }
+    if (nativeChat && process.env.HAPPY_RECONNECT_SESSION_ID && process.env.HAPPY_RECONNECT_SESSION_ID !== nativeChat.sessionId) {
+        throw new Error('Daemon reconnect identity differs from the native chat checkpoint.');
+    }
     // Check for session reconnection env vars (set by daemon for resume-in-place)
-    const reconnectSessionId = process.env.HAPPY_RECONNECT_SESSION_ID;
-    const reconnectKeyBase64 = process.env.HAPPY_RECONNECT_ENCRYPTION_KEY;
-    const reconnectVariant = process.env.HAPPY_RECONNECT_ENCRYPTION_VARIANT as 'legacy' | 'dataKey' | undefined;
+    const reconnectSessionId = nativeChat?.sessionId ?? process.env.HAPPY_RECONNECT_SESSION_ID;
+    const reconnectKeyBase64 = nativeChat?.encryptionKey ?? process.env.HAPPY_RECONNECT_ENCRYPTION_KEY;
+    const reconnectVariant = nativeChat?.encryptionVariant ?? process.env.HAPPY_RECONNECT_ENCRYPTION_VARIANT as 'legacy' | 'dataKey' | undefined;
     const reconnectSeq = process.env.HAPPY_RECONNECT_SEQ;
     const reconnectMetadataVersion = process.env.HAPPY_RECONNECT_METADATA_VERSION;
     const reconnectAgentStateVersion = process.env.HAPPY_RECONNECT_AGENT_STATE_VERSION;
@@ -212,12 +252,20 @@ export async function runCodex(opts: {
             encryptionKey: decodeBase64(reconnectKeyBase64),
             encryptionVariant: reconnectVariant,
             metadata,
-            metadataVersion: parseInt(reconnectMetadataVersion || '0', 10),
+            metadataVersion: nativeChat?.metadataVersion ?? parseInt(reconnectMetadataVersion || '0', 10),
             agentState: state,
-            agentStateVersion: parseInt(reconnectAgentStateVersion || '0', 10),
+            agentStateVersion: nativeChat?.agentStateVersion ?? parseInt(reconnectAgentStateVersion || '0', 10),
         };
     } else {
         response = await api.getOrCreateSession({ tag: sessionTag, metadata, state });
+    }
+
+    if (native) {
+        if (!response) throw new Error('Happy is unavailable; retry the same resume command. No replacement chat was started.');
+        nativeChat ??= createNativeChat(opts.resumeThreadId!, opts.credentials, response);
+        nativeChat.account = accountName;
+        writeNativeChat(nativeChat);
+        metadata.codexThreadId = opts.resumeThreadId;
     }
 
     // Handle server unreachable case - create offline stub with hot reconnection
@@ -243,13 +291,15 @@ export async function runCodex(opts: {
         }
     });
     session = initialSession;
+    if (nativeChat) session.resumeNativeInput(nativeChat.inputSeq);
 
     // On reconnect, un-archive the session and skip replaying old messages.
     if (reconnectSessionId) {
         session.suppressNextArchiveSignal();
-        session.skipExistingMessages();
+        if (!nativeChat) session.skipExistingMessages();
         session.updateMetadata((meta) => ({
             ...meta,
+            ...(nativeChat ? metadata : {}),
             lifecycleState: 'running',
             archivedBy: undefined,
         }));
@@ -372,6 +422,7 @@ export async function runCodex(opts: {
         }
 
         const enhancedMode: EnhancedMode = {
+            receivedSeq: session.userMessageSeq(message),
             permissionMode: modeResolution.permissionMode,
             model: modeResolution.model,
             appendSystemPrompt: messageAppendSystemPrompt,
@@ -617,7 +668,7 @@ export async function runCodex(opts: {
     // Start Context 
     //
 
-    client = new CodexAppServerClient(sandboxConfig, opts.nativeMobileDirectory ? join(opts.nativeMobileDirectory, 'b.sock') : undefined);
+    client = native?.client ?? new CodexAppServerClient(sandboxConfig, opts.nativeMobileDirectory ? join(opts.nativeMobileDirectory, 'b.sock') : undefined);
     let nativeLease: ChildProcess | undefined;
     let closeNativeFrontend: (() => Promise<void>) | undefined;
     const mobileUserMessageIds = new Set<string>();
@@ -958,7 +1009,11 @@ export async function runCodex(opts: {
             codexCollabReceiverThreadIdsByCall = mapped.collabReceiverThreadIdsByCall;
             codexCollabToolByCall = mapped.collabToolByCall;
             for (const envelope of mapped.envelopes) {
-                session.sendSessionProtocolMessage(envelope);
+                if (nativeChat && msg.type === 'agent_message' && typeof msg.item_id === 'string' && envelope.ev.t === 'text') {
+                    session.sendSessionProtocolMessage({ ...envelope, id: msg.item_id, codexItemId: msg.item_id });
+                } else {
+                    session.sendSessionProtocolMessage(envelope);
+                }
             }
         }
     });
@@ -991,8 +1046,8 @@ export async function runCodex(opts: {
         await client.connect();
         logger.debug('[codex]: client.connect done');
 
-        let backendPid: number | undefined;
-        if (opts.nativeMobileDirectory) {
+        let backendPid: number | undefined = native?.backendPid;
+        if (opts.nativeMobileDirectory && !native) {
             backendPid = await client.nativeBackendPid();
             if (opts.resumeThreadId) nativeLease = await acquireNativeLease(opts.resumeThreadId, backendPid, () => { if (!shouldExit) void terminateSession(); });
         }
@@ -1030,6 +1085,14 @@ export async function runCodex(opts: {
                     historyBoundaryError = error;
                 }
             }
+            if (nativeChat?.legacyHistoryPending && !historyBoundaryError) {
+                // The owner permits a fresh mobile history baseline on migration.
+                // Codex history stays untouched; only the display backfill boundary changes.
+                nativeChat.historyBoundary = historyBoundary;
+                nativeChat.historySeq = nativeHistorySnapshot?.seq ?? nativeChat.inputSeq;
+                nativeChat.legacyHistoryPending = false;
+                writeNativeChat(nativeChat);
+            }
             nativeHistoryAbort.signal.throwIfAborted();
             first = false;
             closeNativeFrontend = await publishNativeMobileReady(opts.nativeMobileDirectory, client.threadId!, backendPid!);
@@ -1041,23 +1104,29 @@ export async function runCodex(opts: {
                     let publishedTurns = 0;
                     try {
                         if (historyBoundaryError) throw historyBoundaryError;
-                        if (historyBoundary === null) return;
+                        if (historyBoundary === null || nativeChat?.historyBoundary === historyBoundary) return;
+                        const snapshot = nativeHistorySnapshot ?? (nativeChat ? await readNativeChatHistory(nativeChat, opts.credentials, nativeHistoryAbort.signal) : undefined);
                         session.sendSessionEvent({ type: 'message', message: 'Codex is ready. Earlier messages are syncing to this chat; you can continue working.' });
                         const context = createCodexBackfillContext();
                         const turns = await syncNativeHistory({
-                            client, threadId, boundaryId: historyBoundary, signal: nativeHistoryAbort.signal,
+                            client, threadId, boundaryId: historyBoundary, afterTurnId: nativeChat?.historyBoundary ?? undefined, signal: nativeHistoryAbort.signal,
                             publishTurn: async turn => {
                                 for (const item of turn.items ?? []) if (item.type === 'userMessage') nativeUserItems.add(item.id);
                                 const envelopes = await buildCodexThreadBackfillEnvelopes({
-                                    thread: { turns: [turn] }, context, signal: nativeHistoryAbort.signal,
+                                    thread: { turns: [{ ...turn, items: turn.items?.filter(item => !nativeChat || !isNativePhoneInput(item, nativeChat.sessionId)) }] }, context, signal: nativeHistoryAbort.signal,
                                     uploadLocalImage: (attachment, imageOpts) => session.uploadLocalImageAttachmentEnvelope(attachment, imageOpts, nativeHistoryAbort.signal),
                                 });
-                                await session.sendSessionProtocolHistory(envelopes, nativeHistoryAbort.signal);
+                                await session.sendSessionProtocolHistory(snapshot ? unseenNativeHistory(envelopes, snapshot.envelopes) : envelopes, nativeHistoryAbort.signal);
                                 publishedTurns++;
                                 logger.debug('[Codex native history] Delivered turn', { threadId, publishedTurns, elapsedMs: Date.now() - startedAt });
                             },
                         });
                         nativeHistoryAbort.signal.throwIfAborted();
+                        if (nativeChat && snapshot) {
+                            nativeChat.historyBoundary = historyBoundary;
+                            nativeChat.historySeq = snapshot.seq;
+                            writeNativeChat(nativeChat);
+                        }
                         session.sendSessionEvent({ type: 'message', message: 'Earlier Codex messages have finished syncing to this chat.' });
                         logger.debug('[Codex native history] Complete', { threadId, turns, elapsedMs: Date.now() - startedAt });
                     } catch (error) {
@@ -1235,10 +1304,17 @@ export async function runCodex(opts: {
 
                 // A signal may have arrived while thread/image preparation awaited I/O.
                 if (shouldExit) break;
-                const clientUserMessageId = opts.nativeMobileDirectory ? randomUUID() : undefined;
+                const clientUserMessageId = nativeChat ? nativePhoneInputId(nativeChat.sessionId) : opts.nativeMobileDirectory ? randomUUID() : undefined;
                 if (clientUserMessageId) mobileUserMessageIds.add(clientUserMessageId);
                 const result = await client.sendTurnAndWait(turnPrompt, {
                     clientUserMessageId,
+                    beforeSend: () => {
+                        if (shouldExit) throw new Error('Session stopped before input submission');
+                        if (nativeChat) {
+                            nativeChat.inputSeq = Math.max(nativeChat.inputSeq, ...messageQueue.consumedModes(message!).map(mode => mode.receivedSeq ?? 0));
+                            writeNativeChat(nativeChat);
+                        }
+                    },
                     model: message.mode.model,
                     approvalPolicy: executionPolicy.approvalPolicy,
                     sandbox: executionPolicy.sandbox,
