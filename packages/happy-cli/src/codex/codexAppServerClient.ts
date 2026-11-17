@@ -1003,8 +1003,19 @@ export class CodexAppServerClient {
         cursor?: string;
         sortDirection: 'asc' | 'desc';
         itemsView: 'notLoaded' | 'full';
+        limit?: number;
     }): Promise<{ data: ThreadTurn[]; nextCursor: string | null }> {
-        return await this.request('thread/turns/list', { ...opts, limit: 1 }) as { data: ThreadTurn[]; nextCursor: string | null };
+        return await this.request('thread/turns/list', { limit: 1, ...opts }) as { data: ThreadTurn[]; nextCursor: string | null };
+    }
+
+    nativeInputGate?: (send: () => Promise<unknown>) => Promise<unknown>;
+
+    /** Only the single-thread native proxy uses this entry; approval replies keep their original connection. */
+    async nativeFrontendRequest(method: string, params: Record<string, unknown>): Promise<unknown> {
+        if (!['thread/revert', 'turn/start', 'turn/steer'].includes(method) || params.threadId !== this._threadId) {
+            throw new Error('Native request is outside the bound session.');
+        }
+        return this.request(method, params);
     }
 
     async rollbackThread(opts: {
@@ -1374,6 +1385,20 @@ export class CodexAppServerClient {
     private static readonly REQUEST_TIMEOUT_MS = 30_000;
 
     private request(method: string, params?: unknown, timeoutMs?: number, beforeSend?: () => void): Promise<unknown> {
+        const send = async () => {
+            const result = await this.requestNow(method, params, timeoutMs, beforeSend);
+            // The response may precede turn/started. Reserve the turn before the
+            // acceptance gate opens to a concurrent native rewind.
+            if (this.nativeSocketPath && method === 'turn/start') {
+                const turnId = (result as { turn?: { id?: unknown } })?.turn?.id;
+                if (typeof turnId === 'string' && !this.completedTurnIds.has(turnId)) this._turnId = turnId;
+            }
+            return result;
+        };
+        return this.nativeInputGate && ['turn/start', 'turn/steer'].includes(method) ? this.nativeInputGate(send) : send();
+    }
+
+    private requestNow(method: string, params?: unknown, timeoutMs?: number, beforeSend?: () => void): Promise<unknown> {
         const timeout = timeoutMs ?? CodexAppServerClient.REQUEST_TIMEOUT_MS;
         return new Promise((resolve, reject) => {
             if (!this.transportWritable()) {

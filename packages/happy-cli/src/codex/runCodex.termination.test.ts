@@ -4,6 +4,9 @@ import vm from 'node:vm';
 import ts from 'typescript';
 import { describe, expect, it } from 'vitest';
 import { codexAccountName } from './accountBridge';
+import { emptyNativeRewind, NativeRewindCoordinator, NativeRewindRecoveryError } from './nativeRewind';
+import { mapCodexMcpMessageToSessionEnvelopes } from './utils/sessionProtocolMapper';
+import { createEnvelope } from '@slopus/happy-wire';
 
 const noop = () => {};
 function deferred() {
@@ -67,11 +70,15 @@ function harness(preparation: boolean, slowCleanup: boolean, native = false) {
     class Queue {
         waitForMessagesAndGetAsString = async () => ({ message: 'hello', mode: {}, attachments: [] });
         size = () => 0;
+        consumedModes = () => [];
     }
     let metadata: any = { path: '/mock', host: 'test' };
+    const envelopes: any[] = [];
     const session = {
         resumeNativeInput: noop, sessionId: 's', rpcHandlerManager: { registerHandler: noop }, onFileEvent: noop, onUserMessage: noop,
         updateAgentState: noop, updateMetadata: (update: any) => { metadata = update(metadata); }, keepAlive: noop, sendSessionEvent: noop,
+        updateMetadataConfirmed: async (update: any) => { metadata = update(metadata); },
+        sendSessionProtocolMessage: (envelope: any) => envelopes.push(envelope),
         sendSessionDeath: () => events.push('death'), flush: async () => {},
         close: async () => { events.push('close'); }, getMetadata: () => ({}),
     };
@@ -92,7 +99,8 @@ function harness(preparation: boolean, slowCleanup: boolean, native = false) {
         isCodexClearText: () => false, parseCodexGoalCommand: () => null, resolveCodexExecutionPolicy: () => ({}),
         acquireNativeLease: async () => ({ stdin: { end: noop } }),
         publishNativeMobileReady: async () => noop,
-        readNativeChat: () => null, createNativeChat: () => ({ inputSeq: 0 }), writeNativeChat: noop,
+        readNativeChat: () => null, createNativeChat: () => ({ inputSeq: 0, rewind: emptyNativeRewind() }), writeNativeChat: noop,
+        emptyNativeRewind, NativeRewindCoordinator, NativeRewindRecoveryError, mapCodexMcpMessageToSessionEnvelopes, createEnvelope,
         nativePhoneInputId: () => 'happy-native:s:input',
         resumeExistingThread: async ({ client }: any) => client.resumeThread(),
         prepareCodexImageInputItems: async () => {
@@ -112,10 +120,24 @@ function harness(preparation: boolean, slowCleanup: boolean, native = false) {
     context.exports = {};
     vm.runInNewContext(compile('./runCodex.ts'), context);
     const running = context.exports.runCodex({ credentials: {}, nativeConfig: preparation, ...(native ? { nativeMobileDirectory: '/mock' } : {}) });
-    return { events, proc, prepared, releasePrepare, started, cleaning, releaseCleanup, running, client: () => client, metadata: () => metadata };
+    return { events, envelopes, proc, prepared, releasePrepare, started, cleaning, releaseCleanup, running, client: () => client, metadata: () => metadata };
 }
 
 describe('Codex termination through the runner', () => {
+    it('forwards live native turns and failures with the source history identity', async () => {
+        const h = harness(true, false, true);
+        await Promise.race([h.prepared.promise, h.running]);
+        try {
+            h.client().handleNotification('turn/started', { threadId: 'thread', turn: { id: 'native-turn' } });
+            h.client().handleNotification('item/completed', { threadId: 'thread', turnId: 'native-turn', item: { type: 'agentMessage', id: 'answer', text: 'answer', phase: 'final_answer' } });
+            h.client().handleNotification('turn/completed', { threadId: 'thread', turn: { id: 'native-turn', status: 'failed', error: { message: 'fixture failure' } } });
+            expect(h.envelopes.some(envelope => envelope.ev.text === 'answer')).toBe(true);
+            expect(h.envelopes.some(envelope => envelope.ev.text === 'Codex error: fixture failure')).toBe(true);
+            expect(h.envelopes.every(envelope => envelope.turn === 'native-turn')).toBe(true);
+        } finally {
+            h.proc.emit('SIGTERM'); h.releasePrepare.resolve(); await h.running;
+        }
+    });
     it.each([false, true])('publishes Codex names to the phone metadata only in native mode (%s)', async native => {
         const h = harness(true, false, native);
         await Promise.race([h.prepared.promise, h.running]);

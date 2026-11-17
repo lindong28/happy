@@ -11,6 +11,7 @@ import type { Metadata, Session } from '@/api/types';
 import type { Credentials } from '@/persistence';
 import { readPersistedSessions } from '@/persistence';
 import { logger } from '@/ui/logger';
+import { emptyNativeRewind, nativeRewindIntentSchema, nativeRewindProjectionSchema } from './nativeRewind';
 
 const uuid = z.string().uuid();
 const seq = z.number().int().nonnegative();
@@ -31,6 +32,8 @@ const chatSchema = z.object({
     cwd: z.string(),
     legacyPending: z.boolean(),
     legacyHistoryPending: z.boolean(),
+    rewind: nativeRewindProjectionSchema.optional(),
+    rewindIntent: nativeRewindIntentSchema.optional(),
 });
 export type NativeChat = z.infer<typeof chatSchema>;
 
@@ -87,6 +90,7 @@ export function createNativeChat(threadId: string, credentials: Credentials, ses
         sessionId: session.id, encryptionKey: encodeBase64(session.encryptionKey), encryptionVariant: session.encryptionVariant,
         metadataVersion: session.metadataVersion, agentStateVersion: session.agentStateVersion,
         inputSeq: 0, historySeq: 0, historyBoundary: null,
+        rewind: emptyNativeRewind(),
         account: process.env.HAPPY_CODEX_ACCOUNT_NAME, cwd: process.cwd(), legacyPending: false, legacyHistoryPending: false,
     };
 }
@@ -226,7 +230,10 @@ export async function discoverLegacyNativeChat(threadId: string, credentials: Cr
 }
 
 /** Client identity is recorded by Codex on userMessage items, including thread history. */
-export function nativePhoneInputId(sessionId: string): string { return `happy-native:${sessionId}:${randomUUID()}`; }
+/** Versioned by shape: session:firstRelaySeq:lastRelaySeq:uuid; old UUID-only IDs remain recognizable. */
+export function nativePhoneInputId(sessionId: string, range?: [number, number]): string {
+    return `happy-native:${sessionId}:${range ? `${range[0]}:${range[1]}:` : ''}${randomUUID()}`;
+}
 export function isNativePhoneInput(item: { type: string; clientId?: string | null }, sessionId: string): boolean {
     return item.type === 'userMessage' && typeof item.clientId === 'string' && item.clientId.startsWith(`happy-native:${sessionId}:`);
 }

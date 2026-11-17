@@ -50,6 +50,7 @@ import { createSerialAsyncHandler } from './utils/serialAsyncHandler';
 import { buildCodexThreadBackfillEnvelopes, createCodexBackfillContext } from './utils/threadImageBackfill';
 import { syncNativeHistory } from './nativeHistory';
 import { createNativeChat, isNativePhoneInput, nativePhoneInputId, readNativeChat, readNativeChatHistory, unseenNativeHistory, writeNativeChat, type NativeChat } from './nativeChat';
+import { emptyNativeRewind, NativeRewindCoordinator, NativeRewindRecoveryError } from './nativeRewind';
 import {
     buildCodexTurnPrompt,
     hashCodexEnhancedMode,
@@ -445,6 +446,11 @@ async function runCodexSession(opts: RunCodexOptions, native?: { client: CodexAp
     session.onUserMessage(handleUserMessage);
     let thinking = false;
     let currentTurnId: string | null = null;
+    const sendTurnFailure = (message: Record<string, unknown>, failure: string) => {
+        const turn = typeof message.turn_id === 'string' ? message.turn_id : currentTurnId;
+        if (turn) session.sendSessionProtocolMessage(createEnvelope('agent', { t: 'service', text: `Codex error: ${failure}` }, { turn }));
+        else session.sendSessionEvent({ type: 'message', message: `Codex error: ${failure}` });
+    };
     bindQuestionFormDisplay(questionForms, message => session.sendSessionProtocolMessage(message), () => currentTurnId);
     let codexStartedSubagents = new Set<string>();
     let codexActiveSubagents = new Set<string>();
@@ -673,9 +679,9 @@ async function runCodexSession(opts: RunCodexOptions, native?: { client: CodexAp
     let closeNativeFrontend: (() => Promise<void>) | undefined;
     const mobileUserMessageIds = new Set<string>();
     const nativeUserItems = new Set<string>();
-    const forwardNativeUser = createSerialAsyncHandler<ThreadItem>(async item => {
+    const forwardNativeUser = createSerialAsyncHandler<{ item: ThreadItem; turnId: string }>(async ({ item, turnId }) => {
         const envelopes = await buildCodexThreadBackfillEnvelopes({
-            thread: { turns: [{ id: currentTurnId ?? '', items: [item], status: 'inProgress' }] },
+            thread: { turns: [{ id: turnId, items: [item], status: 'inProgress' }] },
             uploadLocalImage: (attachment, imageOpts) => session.uploadLocalImageAttachmentEnvelope(attachment, imageOpts),
         });
         for (const envelope of envelopes) {
@@ -856,7 +862,7 @@ async function runCodexSession(opts: RunCodexOptions, native?: { client: CodexAp
             if (nativeUserItems.has(item.id)) return;
             nativeUserItems.add(item.id);
             if (item.clientId && mobileUserMessageIds.delete(item.clientId)) return;
-            forwardNativeUser(item);
+            if (typeof msg.turnId === 'string') forwardNativeUser({ item, turnId: msg.turnId });
             return;
         }
         if (msg.type === 'user_questions') {
@@ -917,7 +923,7 @@ async function runCodexSession(opts: RunCodexOptions, native?: { client: CodexAp
             const failure = describeCodexFailure(msg);
             if (failure) {
                 messageBuffer.addMessage(`Task failed: ${failure}`, 'status');
-                session.sendSessionEvent({ type: 'message', message: `Codex error: ${failure}` });
+                sendTurnFailure(msg, failure);
             } else {
                 messageBuffer.addMessage('Task completed', 'status');
             }
@@ -925,7 +931,7 @@ async function runCodexSession(opts: RunCodexOptions, native?: { client: CodexAp
             const failure = describeCodexFailure(msg);
             if (failure) {
                 messageBuffer.addMessage(`Turn aborted: ${failure}`, 'status');
-                session.sendSessionEvent({ type: 'message', message: `Codex error: ${failure}` });
+                sendTurnFailure(msg, failure);
             } else {
                 messageBuffer.addMessage('Turn aborted', 'status');
             }
@@ -1093,9 +1099,41 @@ async function runCodexSession(opts: RunCodexOptions, native?: { client: CodexAp
                 nativeChat.legacyHistoryPending = false;
                 writeNativeChat(nativeChat);
             }
+            if (!nativeChat) throw new Error('Native chat checkpoint is missing.');
+            const chat = nativeChat;
+            if (!chat.rewind) {
+                if (historyBoundaryError) throw historyBoundaryError;
+                const snapshot = nativeHistorySnapshot ?? await readNativeChatHistory(chat, opts.credentials, nativeHistoryAbort.signal);
+                // Only the approved old mobile projection is reset. Unconsumed
+                // phone input remains visible and its receipt never moves backwards.
+                chat.rewind = { ...emptyNativeRewind(), legacyThroughSeq: snapshot.seq, legacyInputSeq: chat.inputSeq };
+                chat.historyBoundary = historyBoundary;
+                chat.historySeq = snapshot.seq;
+                writeNativeChat(chat);
+            }
+            const rewind = new NativeRewindCoordinator({
+                threadId: client.threadId!, sessionId: chat.sessionId, state: chat,
+                persist: () => writeNativeChat(chat),
+                publish: projection => session.updateMetadataConfirmed(current => ({ ...current, codexRewind: projection })),
+                list: cursor => client.listThreadTurns({ threadId: client.threadId!, cursor, sortDirection: 'desc', itemsView: 'full', limit: 100 }),
+                revert: beforeTurnId => client.nativeFrontendRequest('thread/revert', { threadId: client.threadId!, beforeTurnId }),
+                active: () => client.turnId !== null,
+                historySettled: () => nativeHistoryTask ?? Promise.resolve(),
+            });
+            await rewind.recover();
+            await session.updateMetadataConfirmed(current => ({ ...current, codexRewind: chat.rewind }));
+            client.nativeInputGate = send => rewind.input(send);
             nativeHistoryAbort.signal.throwIfAborted();
             first = false;
-            closeNativeFrontend = await publishNativeMobileReady(opts.nativeMobileDirectory, client.threadId!, backendPid!);
+            closeNativeFrontend = await publishNativeMobileReady(opts.nativeMobileDirectory, client.threadId!, backendPid!, async (method, params) => {
+                if (method !== 'thread/revert') return client.nativeFrontendRequest(method, params);
+                const result = await rewind.revert(params);
+                cancelQuestions();
+                reasoningProcessor.abort();
+                diffProcessor.reset();
+                currentTurnId = null;
+                return result;
+            });
             logger.debug('[Codex native] Live session ready', { threadId: client.threadId });
             if (opts.resumeThreadId) {
                 const threadId = opts.resumeThreadId;
@@ -1304,14 +1342,17 @@ async function runCodexSession(opts: RunCodexOptions, native?: { client: CodexAp
 
                 // A signal may have arrived while thread/image preparation awaited I/O.
                 if (shouldExit) break;
-                const clientUserMessageId = nativeChat ? nativePhoneInputId(nativeChat.sessionId) : opts.nativeMobileDirectory ? randomUUID() : undefined;
+                const consumedInputSeq = nativeChat ? Math.max(nativeChat.inputSeq, ...messageQueue.consumedModes(message!).map(mode => mode.receivedSeq ?? 0)) : 0;
+                const clientUserMessageId = nativeChat ? nativePhoneInputId(nativeChat.sessionId,
+                    consumedInputSeq > nativeChat.inputSeq ? [nativeChat.inputSeq + 1, consumedInputSeq] : undefined)
+                    : opts.nativeMobileDirectory ? randomUUID() : undefined;
                 if (clientUserMessageId) mobileUserMessageIds.add(clientUserMessageId);
                 const result = await client.sendTurnAndWait(turnPrompt, {
                     clientUserMessageId,
                     beforeSend: () => {
                         if (shouldExit) throw new Error('Session stopped before input submission');
                         if (nativeChat) {
-                            nativeChat.inputSeq = Math.max(nativeChat.inputSeq, ...messageQueue.consumedModes(message!).map(mode => mode.receivedSeq ?? 0));
+                            nativeChat.inputSeq = Math.max(nativeChat.inputSeq, consumedInputSeq);
                             writeNativeChat(nativeChat);
                         }
                     },
@@ -1336,6 +1377,12 @@ async function runCodexSession(opts: RunCodexOptions, native?: { client: CodexAp
                     logger.debug('[Codex] Turn aborted');
                 }
             } catch (error) {
+                if (error instanceof NativeRewindRecoveryError) {
+                    logger.warn('[Codex native] Rewind reconciliation failed; input receipt remains unchanged', error);
+                    session.sendSessionEvent({ type: 'message', message: error.message });
+                    await terminateSession();
+                    break;
+                }
                 if (questionReply) {
                     questionReply.reject(error instanceof CodexRequestRejected && [-32600, -32602].includes(error.code)
                         ? new QuestionDeliveryError(error.message)

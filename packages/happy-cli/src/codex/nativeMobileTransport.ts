@@ -29,7 +29,7 @@ export function nativeThreadRequestError(message: unknown, threadId: string): st
     const method = request.method;
     const params = request.params ?? {};
     const newTerminal = 'This mobile terminal stays on one session. Open a new codex-account terminal to start or resume another session.';
-    if (['thread/start', 'thread/fork', 'thread/delete', 'thread/archive', 'thread/rollback', 'thread/revert'].includes(method)) return newTerminal;
+    if (['thread/start', 'thread/fork', 'thread/delete', 'thread/archive', 'thread/rollback'].includes(method)) return newTerminal;
     if (method === 'thread/resume' && (params.path != null || params.history != null)) return newTerminal;
     if (method === 'review/start' && params.delivery === 'detached') return newTerminal;
     if (['thread/list', 'thread/search', 'thread/searchOccurrences', 'thread/loaded/list', 'thread/read'].includes(method)) return null;
@@ -37,7 +37,9 @@ export function nativeThreadRequestError(message: unknown, threadId: string): st
     return null;
 }
 
-export async function startNativeFrontendProxy(path: string, backend: string, threadId: string): Promise<() => Promise<void>> {
+export type NativeFrontendRequest = (method: string, params: Record<string, unknown>) => Promise<unknown>;
+
+export async function startNativeFrontendProxy(path: string, backend: string, threadId: string, coordinatedRequest?: NativeFrontendRequest): Promise<() => Promise<void>> {
     if (Buffer.byteLength(path) > 100) throw new Error('Native mobile socket path is too long');
     const http = createServer();
     const server = new WebSocketServer({ server: http });
@@ -51,12 +53,30 @@ export async function startNativeFrontendProxy(path: string, backend: string, th
         frontend.on('close', () => { peers.delete(frontend); upstream?.close(); });
         frontend.on('message', data => {
             const raw = data.toString();
-            let message: { id?: unknown } | null;
+            let message: { id?: unknown; method?: string; params?: Record<string, unknown> } | null;
             try { message = JSON.parse(raw); } catch { frontend.close(1007, 'Invalid JSON'); return; }
             const error = nativeThreadRequestError(message, threadId);
             if (error) {
                 if (message?.id !== undefined) frontend.send(JSON.stringify({ jsonrpc: '2.0', id: message.id, error: { code: -32600, message: error } }));
                 return;
+            }
+            if (message?.method && ['thread/revert', 'turn/start', 'turn/steer'].includes(message.method)) {
+                const reply = (body: object) => {
+                    if (frontend.readyState === WebSocket.OPEN && message?.id !== undefined) {
+                        frontend.send(JSON.stringify({ jsonrpc: '2.0', id: message.id, ...body }));
+                    }
+                };
+                if (coordinatedRequest) {
+                    void coordinatedRequest(message.method, message.params ?? {}).then(
+                        result => reply({ result }),
+                        error => reply({ error: { code: typeof error?.code === 'number' ? error.code : -32600, message: error instanceof Error ? error.message : 'Native request failed' } }),
+                    );
+                    return;
+                }
+                if (message.method === 'thread/revert') {
+                    reply({ error: { code: -32600, message: 'This worker cannot synchronize rewind with the phone. Restart it with the updated Happy CLI.' } });
+                    return;
+                }
             }
             if (upstream?.readyState === WebSocket.OPEN) upstream.send(raw);
             else {

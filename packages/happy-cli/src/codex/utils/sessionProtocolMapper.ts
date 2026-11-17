@@ -968,7 +968,8 @@ function mapCodexMcpMessageToSessionEnvelopesInner(message: Record<string, unkno
     const collabToolByCall = getCollabToolByCall(state);
 
     if (type === 'task_started') {
-        const turnId = createId();
+        // Native history and live delivery must share the same rewind identity.
+        const turnId = typeof message.turn_id === 'string' && message.turn_id.length > 0 ? message.turn_id : createId();
         const turnStart = createEnvelope('agent', { t: 'turn-start' }, { turn: turnId });
         startedSubagents.clear();
         activeSubagents.clear();

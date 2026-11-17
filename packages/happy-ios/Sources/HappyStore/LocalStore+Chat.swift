@@ -121,6 +121,7 @@ extension LocalStore {
             let receiptMetadata = JSONValue.object([
                 "client": .object(["id": metadata?["client"]?["id"] ?? .null]),
                 "rigMetadataVersion": metadata?["rigMetadataVersion"] ?? .null,
+                "codexRewind": metadata?["codexRewind"] ?? .null,
                 "capabilities": .object([
                     "messageReceipts": metadata?["capabilities"]?["messageReceipts"] ?? .null
                 ]),

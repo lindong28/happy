@@ -120,6 +120,7 @@ describe('buildCodexThreadBackfillEnvelopes', () => {
         expect(envelopes[1]).toMatchObject({
             role: 'user',
             id: 'user-1:image:1',
+            turn: 'turn-1',
             time: 100_000,
             codexItemId: 'user-1',
             ev: { t: 'file', ref: 'uploaded-ref' },
@@ -134,6 +135,7 @@ describe('buildCodexThreadBackfillEnvelopes', () => {
             name: 'codex-image-1.png',
         }), {
             id: 'user-1:image:1',
+            turn: 'turn-1',
             time: 100_000,
             codexItemId: 'user-1',
         });

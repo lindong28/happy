@@ -321,6 +321,7 @@ export type Metadata = {
   codexThreadId?: string, // Codex app-server thread ID
   codexNativeConfig?: boolean, // Preserve the explicit native-config choice when resuming this session
   codexAccountName?: string, // Optional local account alias; never authentication material
+  codexRewind?: import('../codex/nativeRewind').NativeRewindProjection,
   tools?: string[],
   slashCommands?: string[],
   mcpServers?: Array<{ name: string; status: string }>,

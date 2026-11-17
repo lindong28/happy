@@ -490,7 +490,7 @@ export class ApiSessionClient extends EventEmitter {
 
     async uploadLocalImageAttachmentEnvelope(
         attachment: LocalImageAttachment,
-        opts: Pick<CreateEnvelopeOptions, 'id' | 'time' | 'claudeUuid' | 'codexItemId'> = {},
+        opts: Pick<CreateEnvelopeOptions, 'id' | 'time' | 'claudeUuid' | 'codexItemId' | 'turn'> = {},
         signal?: AbortSignal,
     ): Promise<SessionEnvelope> {
         signal?.throwIfAborted();
@@ -986,6 +986,36 @@ export class ApiSessionClient extends EventEmitter {
 
     skipExistingMessages() {
         this.skipInitialMessages = true;
+    }
+
+    /** Await a durable relay acknowledgement, including a bounded metadata-lock wait. */
+    async updateMetadataConfirmed(handler: (metadata: Metadata) => Metadata): Promise<void> {
+        const deadline = Date.now() + 30_000;
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        try {
+            await Promise.race([
+                this.metadataLock.inLock(async () => {
+                    for (let attempt = 0; attempt < 3; attempt++) {
+                        const remaining = deadline - Date.now();
+                        if (remaining <= 0) throw new Error('Phone history synchronization timed out; resume this session to reconcile it.');
+                        const updated = handler(this.metadata!);
+                        const answer = await this.socket.timeout(Math.min(10_000, remaining)).emitWithAck('update-metadata', {
+                            sid: this.sessionId, expectedVersion: this.metadataVersion,
+                            metadata: encodeBase64(encrypt(this.encryptionKey, this.encryptionVariant, updated)),
+                        });
+                        if (answer.result === 'success' || answer.result === 'version-mismatch') {
+                            if (answer.version >= this.metadataVersion) {
+                                this.metadata = decrypt(this.encryptionKey, this.encryptionVariant, decodeBase64(answer.metadata));
+                                this.metadataVersion = answer.version;
+                            }
+                            if (answer.result === 'success') return;
+                        } else throw new Error('Phone history synchronization was rejected; resume this session to reconcile it.');
+                    }
+                    throw new Error('Phone metadata kept changing; retry after synchronization settles.');
+                }),
+                new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error('Phone history synchronization timed out; resume this session to reconcile it.')), 30_000); }),
+            ]);
+        } finally { if (timer) clearTimeout(timer); }
     }
 
     updateMetadata(handler: (metadata: Metadata) => Metadata) {

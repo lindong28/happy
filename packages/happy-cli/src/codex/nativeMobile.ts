@@ -6,7 +6,7 @@ import { openSync, closeSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { configuration } from '@/configuration';
 import { spawnHappyCLI } from '@/utils/spawnHappyCLI';
-import { startNativeFrontendProxy } from './nativeMobileTransport';
+import { startNativeFrontendProxy, type NativeFrontendRequest } from './nativeMobileTransport';
 
 type NativeReady = { threadId: string; workerPid: number; backendPid: number; account: string; cwd: string };
 
@@ -48,8 +48,8 @@ export async function acquireNativeLease(threadId: string, backendPid: number, o
     return child;
 }
 
-export async function publishNativeMobileReady(directory: string, threadId: string, backendPid: number): Promise<() => Promise<void>> {
-    const closeProxy = await startNativeFrontendProxy(join(directory, 'f.sock'), join(directory, 'b.sock'), threadId);
+export async function publishNativeMobileReady(directory: string, threadId: string, backendPid: number, coordinatedRequest?: NativeFrontendRequest): Promise<() => Promise<void>> {
+    const closeProxy = await startNativeFrontendProxy(join(directory, 'f.sock'), join(directory, 'b.sock'), threadId, coordinatedRequest);
     const ready: NativeReady = { threadId, backendPid, workerPid: process.pid, account: process.env.HAPPY_CODEX_ACCOUNT_NAME ?? 'default', cwd: process.cwd() };
     await writeFile(join(directory, 'ready.tmp'), JSON.stringify(ready), { mode: 0o600 });
     await rename(join(directory, 'ready.tmp'), join(directory, 'ready.json'));

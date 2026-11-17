@@ -7,6 +7,14 @@ import {
 } from '../utils/sessionProtocolMapper';
 
 describe('mapCodexMcpMessageToSessionEnvelopes', () => {
+    it('keeps the native turn identity across live answer, tool and processor output', () => {
+        const turn = 'b652a137-bdd5-4c28-ad8a-5a3537c92121';
+        const started = mapCodexMcpMessageToSessionEnvelopes({ type: 'task_started', turn_id: turn }, { currentTurnId: null });
+        const answer = mapCodexMcpMessageToSessionEnvelopes({ type: 'agent_message', message: 'live answer' }, started);
+        const tool = mapCodexMcpMessageToSessionEnvelopes({ type: 'exec_command_begin', call_id: 'call', command: ['echo', 'ok'] }, answer);
+        expect([started, answer, tool].flatMap(result => result.envelopes).every(envelope => envelope.turn === turn)).toBe(true);
+        expect(tool.currentTurnId).toBe(turn);
+    });
     it('keeps replies visible across repeated continuations without task_started', () => {
         let state = mapCodexMcpMessageToSessionEnvelopes({ type: 'task_started' }, { currentTurnId: null });
         const turns = new Set([state.currentTurnId]);

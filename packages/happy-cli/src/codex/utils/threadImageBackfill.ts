@@ -17,7 +17,7 @@ import {
 
 type LocalImageUpload = (
     attachment: { data: Uint8Array; mimeType: string; name: string },
-    opts: Pick<CreateEnvelopeOptions, 'id' | 'time' | 'codexItemId'> & { codexItemId: string },
+    opts: Pick<CreateEnvelopeOptions, 'id' | 'time' | 'codexItemId' | 'turn'> & { codexItemId: string },
 ) => Promise<SessionEnvelope>;
 
 function localImagePaths(item: ThreadItem): string[] {
@@ -108,6 +108,7 @@ export async function buildCodexThreadBackfillEnvelopes(opts: {
                 try {
                     envelopes.push(await opts.uploadLocalImage(attachment, {
                         id: `${item.id}:image:${index + 1}`,
+                        turn: turn.id,
                         time: startedAt,
                         codexItemId: item.id,
                     }));

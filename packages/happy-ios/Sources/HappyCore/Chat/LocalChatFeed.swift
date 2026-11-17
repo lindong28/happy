@@ -77,6 +77,8 @@ struct FeedState: Sendable {
     init(sessionId: String) { self.sessionId = sessionId }
 
     func discardsRecords(for change: ChatStoreChange) -> Bool {
+        if let lastChange,
+           lastChange.session?.metadata["codexRewind"] != change.session?.metadata["codexRewind"] { return true }
         guard let lower = change.lowerSeqExclusive, let minimumServerSeq else { return false }
         return minimumServerSeq <= lower
     }
@@ -90,7 +92,8 @@ struct FeedState: Sendable {
     mutating func apply(_ page: ChatStorePage) -> LegacyChatSnapshot {
         ThreadRules.assertOffMain()
         let change = page.change
-        let records = page.records.compactMap(ChatNormalizer.normalize)
+        let projection = CodexRewindProjection(change.session?.metadata)
+        let records = page.records.filter { projection?.includes($0) ?? true }.compactMap(ChatNormalizer.normalize)
         normalizedRecordCount += page.records.count
         for record in page.records {
             if record.seq > 0 { minimumServerSeq = min(minimumServerSeq ?? record.seq, record.seq) }
@@ -101,7 +104,8 @@ struct FeedState: Sendable {
         let metadata = change.session?.metadata
         let hold = SessionMetadata.sendsMessageReceipts(metadata)
         _ = reducer.reduce(
-            records, agentState: change.session?.agentState, holdUserMessagesUntilAccepted: hold)
+            records, agentState: projection?.agentState(change.session?.agentState) ?? change.session?.agentState,
+            holdUserMessagesUntilAccepted: hold, allowStandaloneCompletedPermissions: projection == nil)
         var messages = reducer.messages
         var overlayMessages: [ChatMessage] = []
         var delivery: [String: OutboxDelivery] = [:]

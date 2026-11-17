@@ -63,3 +63,9 @@ it('allows same-session native configuration and rejects detached reviews', () =
     expect(nativeThreadRequestError({ method: 'thread/settings/update', params: { threadId: 'fixed', model: 'chosen' } }, 'fixed')).toBeNull();
     expect(nativeThreadRequestError({ method: 'review/start', params: { threadId: 'fixed', delivery: 'detached' } }, 'fixed')).not.toBeNull();
 });
+
+it('allows native rewind within the bound thread without allowing another thread or a fork', () => {
+    expect(nativeThreadRequestError({ method: 'thread/revert', params: { threadId: 'fixed', beforeTurnId: 'turn' } }, 'fixed')).toBeNull();
+    expect(nativeThreadRequestError({ method: 'thread/revert', params: { threadId: 'other', beforeTurnId: 'turn' } }, 'fixed')).not.toBeNull();
+    expect(nativeThreadRequestError({ method: 'thread/fork', params: { threadId: 'fixed' } }, 'fixed')).not.toBeNull();
+});

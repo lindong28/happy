@@ -219,6 +219,30 @@ describe('ApiSessionClient v3 messages API migration', () => {
         };
 
         mockIo.mockReturnValue(mockSocket);
+        mockSocket.timeout = vi.fn(() => mockSocket);
+    });
+
+    it('confirms encrypted metadata, rebasing a stale version before acknowledging', async () => {
+        const client = new ApiSessionClient('fake-token', session);
+        const serverMetadata = { ...session.metadata, codexAccountName: 'existing' };
+        mockSocket.emitWithAck.mockResolvedValueOnce({ result: 'version-mismatch', version: 2, metadata: encryptContent(session, serverMetadata) });
+        mockSocket.emitWithAck.mockImplementationOnce(async (_event: string, payload: { metadata: string; expectedVersion: number }) => {
+            expect(payload.expectedVersion).toBe(2);
+            const decoded = decrypt(session.encryptionKey, session.encryptionVariant, decodeBase64(payload.metadata));
+            expect(decoded).toEqual({ ...serverMetadata, name: 'changed' });
+            return { result: 'success', version: 3, metadata: payload.metadata };
+        });
+        await client.updateMetadataConfirmed(current => ({ ...current, name: 'changed' }));
+        expect(mockSocket.emitWithAck).toHaveBeenCalledTimes(2);
+        await client.close();
+    });
+
+    it.each(['hard-error', 'timeout'])('does not claim metadata synchronization on %s', async failure => {
+        const client = new ApiSessionClient('fake-token', session);
+        if (failure === 'timeout') mockSocket.emitWithAck.mockRejectedValueOnce(new Error('ack timeout'));
+        await expect(client.updateMetadataConfirmed(current => current)).rejects.toThrow();
+        expect(mockSocket.emitWithAck).toHaveBeenCalledTimes(1);
+        await client.close();
     });
 
     afterEach(() => {
@@ -653,11 +677,13 @@ describe('ApiSessionClient v3 messages API migration', () => {
             name: 'codex-image-1.png',
         }, {
             codexItemId: 'codex-user-item-1',
+            turn: 'native-turn',
         });
 
         expect(envelope).toMatchObject({
             role: 'user',
             codexItemId: 'codex-user-item-1',
+            turn: 'native-turn',
             ev: {
                 t: 'file',
                 ref: 'sessions/test-session-id/attachments/codex-image.enc',

@@ -66,7 +66,8 @@ public struct ChatReducer: Sendable {
     /// Missing calls and sidechain owners remain buffered across batches.
     public mutating func reduce(
         _ records: [NormalizedChatRecord], agentState: JSONValue? = nil,
-        holdUserMessagesUntilAccepted: Bool = false
+        holdUserMessagesUntilAccepted: Bool = false,
+        allowStandaloneCompletedPermissions: Bool = true
     ) -> ChatReduction {
         ThreadRules.assertOffMain()
         changed = []
@@ -115,7 +116,7 @@ public struct ChatReducer: Sendable {
 
         // Permissions first: tool-start fills an existing placeholder without
         // changing its identity or its original timestamp.
-        applyPermissions(agentState, incoming: fresh)
+        applyPermissions(agentState, incoming: fresh, allowStandaloneCompleted: allowStandaloneCompletedPermissions)
 
         // All calls precede all results in a batch, even when records arrived
         // out of sequence (the same order as the JS phases).
@@ -331,7 +332,7 @@ public struct ChatReducer: Sendable {
         settled.insert(id)
     }
 
-    private mutating func applyPermissions(_ state: JSONValue?, incoming: [NormalizedChatRecord]) {
+    private mutating func applyPermissions(_ state: JSONValue?, incoming: [NormalizedChatRecord], allowStandaloneCompleted: Bool) {
         let incomingCalls = Set(
             incoming.flatMap { record -> [String] in
                 guard case .agent(let blocks) = record.body else {
@@ -350,6 +351,10 @@ public struct ChatReducer: Sendable {
             permission(id: id, value: request, status: .pending, incomingCalls: incomingCalls)
         }
         for (id, request) in completed.sorted(by: { $0.key < $1.key }) {
+            let call = request["toolUseId"]?.stringValue ?? id
+            // Native rewind can deliberately omit old relay history. Completed
+            // approval state must not create a new row for a discarded call.
+            if !allowStandaloneCompleted && tools[call] == nil && !incomingCalls.contains(call) { continue }
             guard let statusName = request["status"]?.stringValue,
                 let status = ToolPermission.Status(rawValue: statusName)
             else {
