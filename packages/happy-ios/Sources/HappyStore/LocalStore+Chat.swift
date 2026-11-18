@@ -122,6 +122,7 @@ extension LocalStore {
                 "client": .object(["id": metadata?["client"]?["id"] ?? .null]),
                 "rigMetadataVersion": metadata?["rigMetadataVersion"] ?? .null,
                 "codexRewind": metadata?["codexRewind"] ?? .null,
+                "codexThreadId": metadata?["codexThreadId"] ?? .null,
                 "capabilities": .object([
                     "messageReceipts": metadata?["capabilities"]?["messageReceipts"] ?? .null
                 ]),

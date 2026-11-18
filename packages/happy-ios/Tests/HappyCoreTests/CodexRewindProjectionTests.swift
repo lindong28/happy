@@ -59,6 +59,11 @@ final class CodexRewindProjectionTests: XCTestCase {
             "t": .string("text"), "text": .string("same text"),
         ]), extra: ["codexItemId": .string("removed-call")])
         XCTAssertFalse(projection.includes(record))
+        let store = try LocalStore.inMemory()
+        try store.upsertSessions([ChatRecords.storeSession(seq: 8, metadata: .object(value))])
+        try store.applyMessagePage(sessionId: "s", messages: [record])
+        var feed = FeedState(sessionId: "s")
+        XCTAssertTrue(feed.apply(try store.chatPage(sessionId: "s")).messages.isEmpty)
         value["codexThreadId"] = .string("different-thread")
         XCTAssertTrue(try XCTUnwrap(CodexRewindProjection(.object(value))).includes(record))
         record.content = ChatRecords.session("new-input", role: "user", event: .object([
