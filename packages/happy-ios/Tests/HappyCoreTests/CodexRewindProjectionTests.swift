@@ -50,6 +50,23 @@ final class CodexRewindProjectionTests: XCTestCase {
         XCTAssertEqual(state.apply(try store.chatPage(sessionId: "s", afterRowId: state.lastRowId)).messages, snapshot.messages)
     }
 
+    func testPreviouslyForwardedNativeTextWithoutTurnUsesScopedItemIdentity() throws {
+        var value = try XCTUnwrap(metadata().objectValue)
+        value["codexThreadId"] = .string("thread")
+        let projection = try XCTUnwrap(CodexRewindProjection(.object(value)))
+        var record = answer("native-input", turn: "retained", seq: 8)
+        record.content = ChatRecords.session("native-input", role: "user", event: .object([
+            "t": .string("text"), "text": .string("same text"),
+        ]), extra: ["codexItemId": .string("removed-call")])
+        XCTAssertFalse(projection.includes(record))
+        value["codexThreadId"] = .string("different-thread")
+        XCTAssertTrue(try XCTUnwrap(CodexRewindProjection(.object(value))).includes(record))
+        record.content = ChatRecords.session("new-input", role: "user", event: .object([
+            "t": .string("text"), "text": .string("same text"),
+        ]), extra: ["codexItemId": .string("new-call")])
+        XCTAssertTrue(projection.includes(record))
+    }
+
     func testMetadataChangeInvalidatesLiveFeedWithoutRewritingStoredMessages() async throws {
         let store = try LocalStore.inMemory()
         try store.upsertSessions([ChatRecords.storeSession(seq: 2)])

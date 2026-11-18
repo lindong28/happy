@@ -654,6 +654,7 @@ export function mapCodexThreadItemToSessionEnvelopes(
             return visibleText
                 ? [createEnvelope('user', { t: 'text', text: visibleText }, {
                     id: item.id,
+                    turn: turn.id,
                     time: startedAt,
                     codexItemId: item.id,
                 })]

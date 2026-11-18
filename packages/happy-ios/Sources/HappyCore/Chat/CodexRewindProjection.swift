@@ -8,6 +8,7 @@ struct CodexRewindProjection {
     private let legacyInputSeq: Double
     private let discardedTurns: Set<String>
     private let discardedCalls: Set<String>
+    private let threadId: String?
     private let inputRanges: [ClosedRange<Double>]
 
     init?(_ metadata: JSONValue?) {
@@ -17,6 +18,7 @@ struct CodexRewindProjection {
               through >= 0, input >= 0,
               let turns = value["discardedTurnIds"]?.arrayValue,
               let ranges = value["discardedInputRanges"]?.arrayValue else { return nil }
+        threadId = metadata?["codexThreadId"]?.stringValue
         legacyThroughSeq = through
         legacyInputSeq = input
         discardedTurns = Set(turns.compactMap(\.stringValue))
@@ -53,6 +55,11 @@ struct CodexRewindProjection {
         let seq = Double(record.seq)
         if seq > 0 && seq <= legacyThroughSeq && !(phoneInput && seq > legacyInputSeq) { return false }
         if let turn, discardedTurns.contains(turn) { return false }
+        // Older native user text omitted turn, but retained its native item ID.
+        // Match the same thread-scoped identity recorded before native revert.
+        if raw?["role"]?.stringValue == "session",
+           let threadId, let item = envelope?["codexItemId"]?.stringValue,
+           discardedCalls.contains("\(threadId):\(item)") { return false }
         if phoneInput && inputRanges.contains(where: { $0.contains(seq) }) { return false }
         return true
     }

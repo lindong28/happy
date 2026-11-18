@@ -74,6 +74,7 @@ describe('buildCodexThreadBackfillEnvelopes', () => {
         expect(envelopes.find(envelope => envelope.role === 'user')?.ev).toEqual({
             t: 'text', text: 'Which device?\nMac\n\nDetails?\na < b\nsecond line',
         });
+        expect(envelopes.find(envelope => envelope.role === 'user')?.turn).toBe('turn');
         expect(item.content[0].text).toBe(text);
     });
 
