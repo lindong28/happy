@@ -7,6 +7,7 @@ import { join, resolve } from 'node:path';
 import { configuration } from '@/configuration';
 import { spawnHappyCLI } from '@/utils/spawnHappyCLI';
 import { startNativeFrontendProxy, type NativeFrontendRequest } from './nativeMobileTransport';
+import { registerNativeTerminal, syncNativeTerminal, type NativeTerminal } from './nativeTerminal';
 
 type NativeReady = { threadId: string; workerPid: number; backendPid: number; account: string; cwd: string };
 
@@ -110,12 +111,24 @@ export async function launchNativeMobile(args: string[], resumeThreadId?: string
         }
     }
     const selectedDirectory = resolve(directory!);
-    const frontend = spawn(process.env.HAPPY_CODEX_PATH, ['--remote', `unix://${join(selectedDirectory, 'f.sock')}`, 'resume', ready.threadId], {
-        stdio: 'inherit', env: { ...process.env, HAPPY_NATIVE_MOBILE_DIR: selectedDirectory },
-    });
-    const code = await new Promise<number>((resolveExit, reject) => {
-        frontend.once('error', reject);
-        frontend.once('exit', (status, signal) => resolveExit(status ?? (signal ? 130 : 1)));
-    });
-    process.exitCode = code;
+    let terminal: NativeTerminal | null = null;
+    try {
+        terminal = await registerNativeTerminal(selectedDirectory, ready.threadId);
+        if (terminal) await syncNativeTerminal(terminal, selectedDirectory, ready.threadId);
+    } catch (error) {
+        const reason = error instanceof Error ? error.message : 'unknown failure';
+        process.stderr.write(`Happy terminal title unavailable for ${ready.threadId}: ${reason}. The session will continue.\n`);
+    }
+    try {
+        const frontend = spawn(process.env.HAPPY_CODEX_PATH, ['--remote', `unix://${join(selectedDirectory, 'f.sock')}`, 'resume', ready.threadId], {
+            stdio: 'inherit', env: { ...process.env, HAPPY_NATIVE_MOBILE_DIR: selectedDirectory },
+        });
+        const code = await new Promise<number>((resolveExit, reject) => {
+            frontend.once('error', reject);
+            frontend.once('exit', (status, signal) => resolveExit(status ?? (signal ? 130 : 1)));
+        });
+        process.exitCode = code;
+    } finally {
+        await terminal?.close().catch(() => process.stderr.write('Happy terminal title attachment cleanup failed.\n'));
+    }
 }

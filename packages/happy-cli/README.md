@@ -52,6 +52,10 @@ happy acp -- custom-agent --flag
 
 ### Codex 手机接续：开发分支验证状态
 
+原生手机终端可通过可选的 `HAPPY_NATIVE_TITLE_HOOK` 接入现有终端标题脚本；未配置时不依赖该脚本。前台连接在私有 native 会话目录的 `terminal-bindings/` 下登记自己的 TTY、进程及启动身份，断开时只注销自己的登记。后台任务可继续运行，其他连接不受影响。连接时只读查询现有 app-server 的状态，补一次标题；初始同步失败不阻止终端接续。
+
+这项集成的实现位于 `src/codex/nativeTerminal.ts`，连接生命周期由 `nativeMobile.ts` 调用。配套 hook 须验证 `ready.json` 的线程身份、登记的 PID/启动时间/当前 TTY，且在断开后停止延迟和定时写入。记录仅用于本机终端寻址，不是任务完成证明，也不保存账号凭据。安装新 CLI 不会替换已运行的前台或后台；旧连接需要经验证的登记迁入或正常重新连接后才能使用新功能。
+
 原生手机模式恢复同一 UUID 时，后台须先取得该会话的独占锁。若普通 Codex 会话仍在运行，先在原终端退出，再执行 `codex-account resume UUID --account NAME --mobile`；不要删除锁文件或同时启动第二个执行器。出现 `Native mobile startup failed` 时，查看错误指向的 `worker.log`：账号适配器的锁冲突详情会保留在该日志，JSON 就绪协议保持独立。仅有 `Native session lease unavailable (exit 2)` 不能区分锁冲突与适配器其他错误，旧日志中已丢弃的详情无法补回。
 
 原生手机模式恢复长会话时，先恢复 Codex 执行端，再向手机分页同步旧消息；模型仍使用原始上下文，不删减历史。聊天中的同步提示与终端可用状态分别表示两件事。历史读取或发送失败不会结束已恢复的 Codex；已同步消息保留，提示会说明尚未完成，电脑 Happy 日志保留阶段和原因。稍后停止该手机后台再恢复同一 UUID 可重试历史同步；单纯退出终端再接回仍复用原后台，不会重新同步。此行为限原生手机模式，普通 Happy 和 fork 的历史路径不变。
