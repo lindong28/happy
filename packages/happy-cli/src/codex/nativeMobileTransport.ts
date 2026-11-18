@@ -39,7 +39,7 @@ export function nativeThreadRequestError(message: unknown, threadId: string): st
 
 export type NativeFrontendRequest = (method: string, params: Record<string, unknown>) => Promise<unknown>;
 
-export async function startNativeFrontendProxy(path: string, backend: string, threadId: string, coordinatedRequest?: NativeFrontendRequest): Promise<() => Promise<void>> {
+export async function startNativeFrontendProxy(path: string, backend: string, threadId: string, coordinatedRequest?: NativeFrontendRequest, onResume?: () => Promise<void>): Promise<() => Promise<void>> {
     if (Buffer.byteLength(path) > 100) throw new Error('Native mobile socket path is too long');
     const http = createServer();
     const server = new WebSocketServer({ server: http });
@@ -49,6 +49,7 @@ export async function startNativeFrontendProxy(path: string, backend: string, th
         let upstream: WebSocket | undefined;
         const buffered: string[] = [];
         let bufferedBytes = 0;
+        let resumeId: string | number | undefined;
         frontend.on('error', () => frontend.close());
         frontend.on('close', () => { peers.delete(frontend); upstream?.close(); });
         frontend.on('message', data => {
@@ -78,6 +79,7 @@ export async function startNativeFrontendProxy(path: string, backend: string, th
                     return;
                 }
             }
+            if (onResume && message?.method === 'thread/resume' && (typeof message.id === 'number' || typeof message.id === 'string')) resumeId = message.id;
             if (upstream?.readyState === WebSocket.OPEN) upstream.send(raw);
             else {
                 bufferedBytes += Buffer.byteLength(raw);
@@ -92,7 +94,21 @@ export async function startNativeFrontendProxy(path: string, backend: string, th
             socket.on('error', () => frontend.close(1011, 'Codex backend error'));
             socket.on('close', () => { peers.delete(socket); frontend.close(1011, 'Codex backend disconnected'); });
             socket.on('message', (data, isBinary) => {
-                if (frontend.readyState === WebSocket.OPEN) frontend.send(data, { binary: isBinary });
+                if (frontend.readyState !== WebSocket.OPEN) return;
+                frontend.send(data, { binary: isBinary });
+                if (resumeId === undefined || isBinary) return;
+                let response;
+                try { response = JSON.parse(data.toString()); } catch { return; }
+                if (response?.method || response?.id !== resumeId) return;
+                resumeId = undefined;
+                if (response.result?.thread?.id !== threadId) return;
+                // Forward the native reply immediately. Input remains gated while
+                // a pending phone projection is reconciled on the worker.
+                void onResume?.().catch(() => {
+                    if (frontend.readyState === WebSocket.OPEN) frontend.send(JSON.stringify({
+                        method: 'warning', params: { threadId, message: 'Phone rewind synchronization is pending. Reconnect or send your next input to retry synchronization.' },
+                    }));
+                });
             });
             for (const raw of buffered) socket.send(raw);
             buffered.length = 0;

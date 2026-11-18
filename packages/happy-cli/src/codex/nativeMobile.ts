@@ -3,7 +3,7 @@ import { spawn, type ChildProcess } from 'node:child_process';
 import { createInterface } from 'node:readline';
 import { mkdir, mkdtemp, readFile, readdir, writeFile, rename, unlink, lstat } from 'node:fs/promises';
 import { openSync, closeSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { configuration } from '@/configuration';
 import { spawnHappyCLI } from '@/utils/spawnHappyCLI';
 import { startNativeFrontendProxy, type NativeFrontendRequest } from './nativeMobileTransport';
@@ -49,8 +49,8 @@ export async function acquireNativeLease(threadId: string, backendPid: number, o
     return child;
 }
 
-export async function publishNativeMobileReady(directory: string, threadId: string, backendPid: number, coordinatedRequest?: NativeFrontendRequest): Promise<() => Promise<void>> {
-    const closeProxy = await startNativeFrontendProxy(join(directory, 'f.sock'), join(directory, 'b.sock'), threadId, coordinatedRequest);
+export async function publishNativeMobileReady(directory: string, threadId: string, backendPid: number, coordinatedRequest?: NativeFrontendRequest, onResume?: () => Promise<void>): Promise<() => Promise<void>> {
+    const closeProxy = await startNativeFrontendProxy(join(directory, 'f.sock'), join(directory, 'b.sock'), threadId, coordinatedRequest, onResume);
     const ready: NativeReady = { threadId, backendPid, workerPid: process.pid, account: process.env.HAPPY_CODEX_ACCOUNT_NAME ?? 'default', cwd: process.cwd() };
     await writeFile(join(directory, 'ready.tmp'), JSON.stringify(ready), { mode: 0o600 });
     await rename(join(directory, 'ready.tmp'), join(directory, 'ready.json'));
@@ -74,11 +74,19 @@ export async function launchNativeMobile(args: string[], resumeThreadId?: string
     if (!process.stdin.isTTY || !process.stdout.isTTY) throw new Error('Native mobile requires an interactive terminal');
     if (!process.env.HAPPY_CODEX_ACCOUNT_ENTRY || !process.env.HAPPY_CODEX_PATH) throw new Error('Use the updated codex-account --account NAME --mobile launcher');
     const root = join(configuration.happyHomeDir, 'native');
-    await mkdir(root, { recursive: true, mode: 0o700 });
+    const attachIndex = args.indexOf('--attach-existing');
+    if (attachIndex < 0) await mkdir(root, { recursive: true, mode: 0o700 });
     await validateNativeMobileDirectory(root);
     let directory: string | undefined;
     let ready: NativeReady | null = null;
-    if (resumeThreadId) {
+    if (attachIndex >= 0) {
+        directory = args[attachIndex + 1];
+        if (!directory || !resumeThreadId || resolve(directory) !== directory || dirname(directory) !== root) throw new Error('Invalid existing mobile session directory.');
+        ready = await readReady(directory);
+        if (!ready || ready.threadId !== resumeThreadId || ready.account !== process.env.HAPPY_CODEX_ACCOUNT_NAME || ready.cwd !== process.cwd()) {
+            throw new Error('The selected session backend changed. Run codex-account sessions before retrying.');
+        }
+    } else if (resumeThreadId) {
         for (const name of await readdir(root)) {
             const candidate = join(root, name);
             const value = await readReady(candidate);

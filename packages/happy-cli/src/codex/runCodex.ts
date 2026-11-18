@@ -1115,7 +1115,7 @@ async function runCodexSession(opts: RunCodexOptions, native?: { client: CodexAp
                 threadId: client.threadId!, sessionId: chat.sessionId, state: chat,
                 persist: () => writeNativeChat(chat),
                 publish: projection => session.updateMetadataConfirmed(current => ({ ...current, codexRewind: projection })),
-                list: cursor => client.listThreadTurns({ threadId: client.threadId!, cursor, sortDirection: 'desc', itemsView: 'full', limit: 100 }),
+                list: (cursor, itemsView) => client.listThreadTurns({ threadId: client.threadId!, cursor, sortDirection: 'desc', itemsView, limit: 100 }),
                 revert: beforeTurnId => client.nativeFrontendRequest('thread/revert', { threadId: client.threadId!, beforeTurnId }),
                 active: () => client.turnId !== null,
                 historySettled: () => nativeHistoryTask ?? Promise.resolve(),
@@ -1133,6 +1133,18 @@ async function runCodexSession(opts: RunCodexOptions, native?: { client: CodexAp
                 diffProcessor.reset();
                 currentTurnId = null;
                 return result;
+            }, async () => {
+                if (!chat.rewindIntent) return;
+                try {
+                    await rewind.recover();
+                    logger.debug('[Codex native] Pending rewind reconciled on terminal resume', { threadId: client.threadId });
+                } catch (error) {
+                    // A concurrent rewind can reject after proving it did not
+                    // change history, which also clears the saved intent.
+                    if (!chat.rewindIntent) return;
+                    logger.warn('[Codex native] Pending rewind could not synchronize on terminal resume', { threadId: client.threadId, error });
+                    throw error;
+                }
             });
             logger.debug('[Codex native] Live session ready', { threadId: client.threadId });
             if (opts.resumeThreadId) {

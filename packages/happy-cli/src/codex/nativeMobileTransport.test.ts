@@ -4,7 +4,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import WebSocket, { WebSocketServer } from 'ws';
-import { expect, it } from 'vitest';
+import { expect, it, vi } from 'vitest';
 import { connectNativeSocket, nativeThreadRequestError, startNativeFrontendProxy } from './nativeMobileTransport';
 
 it('preserves native input and approval replies, rejecting both thread-change paths before forwarding', async () => {
@@ -17,10 +17,11 @@ it('preserves native input and approval replies, rejecting both thread-change pa
     backend.on('connection', socket => socket.on('message', data => {
         const request = JSON.parse(data.toString());
         received.push(request);
-        if (request.method) socket.send(JSON.stringify({ id: request.id, result: { echoed: request.params } }));
+        if (request.method) socket.send(JSON.stringify({ id: request.id, result: request.method === 'thread/resume' ? { thread: { id: 'fixed' } } : { echoed: request.params } }));
     }));
     await new Promise<void>(resolve => http.listen(backendPath, resolve));
-    const close = await startNativeFrontendProxy(frontendPath, backendPath, 'fixed');
+    const resumed = vi.fn(async () => {});
+    const close = await startNativeFrontendProxy(frontendPath, backendPath, 'fixed', undefined, resumed);
     let frontend: WebSocket | undefined;
     try {
         frontend = await connectNativeSocket(frontendPath);
@@ -41,8 +42,10 @@ it('preserves native input and approval replies, rejecting both thread-change pa
             { id: 4, method: 'turn/start', params: { threadId: 'other', input: [] } },
         ]) expect((await exchange(request)).error).toBeDefined();
         expect(received).toEqual([]);
+        expect(resumed).not.toHaveBeenCalled();
         const resume = { id: 5, method: 'thread/resume', params: { threadId: 'fixed', path: null, history: null } };
         expect((await exchange(resume)).error).toBeUndefined();
+        expect(resumed).toHaveBeenCalledTimes(1);
         const input = { id: 6, method: 'turn/start', params: { threadId: 'fixed', input: [{ type: 'text', text: '你好' }] } };
         await exchange(input);
         const approval = { id: 91, result: { decision: 'accept' } };

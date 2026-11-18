@@ -65,7 +65,10 @@ it('recovers a committed rewind after metadata failure without replaying native 
     f.deps.publish.mockRejectedValueOnce(new Error('relay disconnected'));
     await expect(f.coordinator.revert({ threadId: 'thread', beforeTurnId: 'b' })).rejects.toThrow('relay');
     expect(f.state.rewindIntent).toBeDefined();
+    f.deps.list.mockClear();
     const resumed = new NativeRewindCoordinator(f.deps);
+    await resumed.recover();
+    expect(f.deps.list).not.toHaveBeenCalled();
     const send = vi.fn(async () => 'new input');
     expect(await resumed.input(send)).toBe('new input');
     expect(f.turns().map(turn => turn.id)).toEqual(['a']);

@@ -55,7 +55,7 @@ type Dependencies = {
     state: NativeRewindState;
     persist: () => void;
     publish: (projection: NativeRewindProjection) => Promise<void>;
-    list: (cursor?: string) => Promise<{ data: ThreadTurn[]; nextCursor: string | null }>;
+    list: (cursor: string | undefined, itemsView: 'full' | 'notLoaded') => Promise<{ data: ThreadTurn[]; nextCursor: string | null }>;
     revert: (beforeTurnId: string) => Promise<unknown>;
     active: () => boolean;
     historySettled: () => Promise<unknown>;
@@ -86,14 +86,14 @@ export class NativeRewindCoordinator {
         try { return await send(); } finally { this.acceptingInputs--; }
     }
 
-    private async turnsUntil(target?: string): Promise<ThreadTurn[]> {
+    private async turnsUntil(target: string, itemsView: 'full' | 'notLoaded' = 'full'): Promise<ThreadTurn[]> {
         const turns: ThreadTurn[] = [];
         const cursors = new Set<string>();
         let cursor: string | undefined;
         const deadline = Date.now() + 60_000;
         do {
             if (Date.now() >= deadline) throw new Error('Reading Codex rewind history timed out; history was not retried or rewritten.');
-            const page = await this.deps.list(cursor);
+            const page = await this.deps.list(cursor, itemsView);
             turns.push(...page.data);
             const index = target ? turns.findIndex(turn => turn.id === target) : -1;
             if (index >= 0 && (index < turns.length - 1 || !page.nextCursor)) return turns;
@@ -115,7 +115,12 @@ export class NativeRewindCoordinator {
         };
         state.historyBoundary = intent.retainedBoundary;
         this.deps.persist(); // Keep intent until the relay has acknowledged the projection.
-        await this.deps.publish(state.rewind);
+        await this.publishPending();
+    }
+
+    private async publishPending(): Promise<void> {
+        const state = this.deps.state;
+        await this.deps.publish(state.rewind!);
         delete state.rewindIntent;
         this.deps.persist();
     }
@@ -125,7 +130,14 @@ export class NativeRewindCoordinator {
         const work = async () => {
             const intent = this.deps.state.rewindIntent;
             if (!intent) return;
-            const turns = await this.turnsUntil(intent.beforeTurnId);
+            // commit() persists the projection and boundary together before waiting
+            // for the relay. This covers checkpoints written by older workers too.
+            const state = this.deps.state;
+            if (state.historyBoundary === intent.retainedBoundary && state.rewind?.discardedTurnIds.includes(intent.beforeTurnId)) {
+                await this.publishPending();
+                return;
+            }
+            const turns = await this.turnsUntil(intent.beforeTurnId, 'notLoaded');
             if (turns.some(turn => turn.id === intent.beforeTurnId)) {
                 // Native mutation did not happen. Do not replay it on restart.
                 delete this.deps.state.rewindIntent;
@@ -168,7 +180,7 @@ export class NativeRewindCoordinator {
             let result: unknown;
             try { result = await this.deps.revert(beforeTurnId); }
             catch (error) {
-                const remaining = await this.turnsUntil(beforeTurnId);
+                const remaining = await this.turnsUntil(beforeTurnId, 'notLoaded');
                 if (remaining.some(turn => turn.id === beforeTurnId)) {
                     delete this.deps.state.rewindIntent;
                     this.deps.persist();
