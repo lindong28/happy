@@ -1,7 +1,17 @@
 /** Private Unix WebSocket transport and the single-thread native frontend boundary. */
 import { createServer } from 'node:http';
-import { chmod, unlink } from 'node:fs/promises';
+import { join } from 'node:path';
+import { chmod, lstat, unlink } from 'node:fs/promises';
 import WebSocket, { WebSocketServer } from 'ws';
+import type { NativeReleaseGate } from './nativeReleaseGate';
+
+export async function validateNativeMobileDirectory(directory: string): Promise<void> {
+    const info = await lstat(directory);
+    if (info.isSymbolicLink() || !info.isDirectory() || info.uid !== process.getuid?.() || (info.mode & 0o077)) {
+        throw new Error('Native mobile session directory must be private and owned by this user');
+    }
+    if (Buffer.byteLength(join(directory, 'f.sock')) > 100) throw new Error('HAPPY_HOME_DIR is too long for native mobile sockets');
+}
 
 export async function connectNativeSocket(path: string, stopped: () => boolean = () => false): Promise<WebSocket> {
     if (Buffer.byteLength(path) > 100) throw new Error('Native mobile socket path is too long; use a shorter HAPPY_HOME_DIR.');
@@ -39,12 +49,15 @@ export function nativeThreadRequestError(message: unknown, threadId: string): st
 
 export type NativeFrontendRequest = (method: string, params: Record<string, unknown>) => Promise<unknown>;
 
-export async function startNativeFrontendProxy(path: string, backend: string, threadId: string, coordinatedRequest?: NativeFrontendRequest, onResume?: () => Promise<void>): Promise<() => Promise<void>> {
+export async function startNativeFrontendProxy(path: string, backend: string, threadId: string, coordinatedRequest?: NativeFrontendRequest, onResume?: () => Promise<void>, releaseGate?: NativeReleaseGate): Promise<() => Promise<void>> {
     if (Buffer.byteLength(path) > 100) throw new Error('Native mobile socket path is too long');
     const http = createServer();
     const server = new WebSocketServer({ server: http });
     const peers = new Set<WebSocket>();
     server.on('connection', frontend => {
+        const detach = releaseGate?.attach();
+        if (releaseGate && !detach) { frontend.close(1013, 'Session upgrade in progress. Reattach shortly.'); return; }
+        if (detach) frontend.once('close', detach);
         peers.add(frontend);
         let upstream: WebSocket | undefined;
         const buffered: string[] = [];

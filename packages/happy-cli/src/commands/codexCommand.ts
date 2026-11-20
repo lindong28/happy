@@ -41,7 +41,9 @@ export async function handleCodexCommand(args: string[]): Promise<void> {
   }
 
   const { credentials } = await authAndSetupMachineIfNeeded()
-  await ensureDaemonRunning()
+  // The scheduled owner validates the daemon before requesting this handoff.
+  // A recovery worker must never upgrade/stop a daemon by package version.
+  if (!process.env.HAPPY_HANDOFF_CHAT || !process.send) await ensureDaemonRunning()
 
   await runCodex({
     credentials,

@@ -53,7 +53,17 @@ import { sanitizeSessionEnvironment } from './daemon/sessionEnvironment'
   if (!args.includes('--version')) {
   }
 
-  if (subcommand === 'native-session') {
+  if (subcommand === 'maintenance') {
+    if (args.length !== 2) throw new Error('Expected one maintenance action');
+    if (args[1] === 'daemon-target') {
+      const { configuration } = await import('./configuration');
+      const url = new URL(configuration.serverUrl);
+      if (!['https:', 'http:'].includes(url.protocol) || url.username || url.password || url.search || url.hash) throw new Error('Invalid daemon target URL');
+      console.log(JSON.stringify({ profile: configuration.happyHomeDir, server: url.toString().replace(/\/+$/, ''), machine: (await readSettings()).machineId ?? null }));
+    } else if (args[1] === 'rollover-workers') {
+      await (await import('./codex/nativeRelease')).rolloverWorkers();
+    } else throw new Error('Unknown maintenance action');
+  } else if (subcommand === 'native-session') {
     await handleNativeSessionCommand(args.slice(1))
   } else if (subcommand === 'doctor') {
     // Check for clean subcommand

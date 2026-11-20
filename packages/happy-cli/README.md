@@ -95,6 +95,12 @@ pnpm exec vitest run --project unit src/codex/userQuestions.test.ts src/codex/qu
 pnpm exec vitest run --project unit src/codex/cliArgs.test.ts src/commands/codexCommand.test.ts src/resume/handleResumeCommand.test.ts src/codex/resumeExistingThread.test.ts src/codex/nativeConfigMetadata.test.ts src/codex/questionFormDisplay.test.ts
 ```
 
+### Happy Personal 后台版本交接
+
+受管安装的维护入口调用 `happy-personal maintenance rollover-workers`。它在原工作进程内核对具名账号、原聊天、线程、工作目录、连接、未决输入和后台任务。有已连接或正在打开的终端、任务、审批、输入队列或不明状态时，原版本继续服务。收到升级请求后暂缓的后台会在终端离开、回合结束或输入处理完毕时复查，达到空闲条件就唤醒已注册的维护作业。周期作业也会复查。旧版未声明交接协议时等待该进程正常退出。
+
+新工作进程通过同一账号续接原聊天，用终端 socket 实际读回线程后才报告 `migrated`。新进程明确在接续前退出会尝试恢复旧版。`restored` 表示旧版已恢复，`unverified` 或 `failed` 表示本次交接仍未确认。私有 `native/s-*/rollover.json` 记录只保留到接续确认，安装器在此期间保护其中的源版本和目标版本。后续维护会重试中断的交接。
+
 ## Daemon
 
 The daemon is a background service that stays running on your machine. It lets you spawn and manage coding sessions remotely — from your phone or the web app — without needing an open terminal.

@@ -20,6 +20,15 @@ import packageJson from '../../package.json';
 import { MessageQueue2, type PendingAttachment } from '@/utils/MessageQueue2';
 import { projectPath } from '@/projectPath';
 import { join } from 'node:path';
+import { once } from 'node:events';
+import { setTimeout as delay } from 'node:timers/promises';
+import { unlink } from 'node:fs/promises';
+import type { Server } from 'node:http';
+import { NativeReleaseGate } from './nativeReleaseGate';
+import { activateStagedWorker, currentWorkerRelease, recordRelease, replaceReleasedWorker, requestReleaseMaintenance, serveRelease, type Identity, type Outcome } from './nativeRelease';
+
+type NativeOwner = { client: CodexAppServerClient; backendPid: number; release?: string; control?: Server;
+    replacement?: { next: string; identity: Identity; finish: (result: Outcome) => void } };
 import { createSessionMetadata } from '@/utils/createSessionMetadata';
 import { startHappyServer } from '@/claude/utils/startHappyServer';
 import { MessageBuffer } from "@/ui/ink/messageBuffer";
@@ -120,6 +129,7 @@ export async function runCodex(opts: RunCodexOptions): Promise<void> {
     if (settings?.sandboxConfig?.enabled) throw new Error('Native configuration conflicts with the enabled Happy sandbox.');
     const client = new CodexAppServerClient(undefined, join(opts.nativeMobileDirectory, 'b.sock'));
     let lease: ChildProcess | undefined;
+    let owner: NativeOwner | undefined;
     try {
         // The UUID lease protects relay identity and input as well as the backend.
         // No Happy session is connected or mutated before it is held.
@@ -128,14 +138,29 @@ export async function runCodex(opts: RunCodexOptions): Promise<void> {
         const threadId = opts.resumeThreadId ?? (await client.startThread({ cwd: process.cwd() })).threadId;
         lease = await acquireNativeLease(threadId, backendPid, () => { void client.disconnect(); });
         if (!opts.resumeThreadId) await client.materializeNativeThread();
-        await runCodexSession({ ...opts, resumeThreadId: threadId }, { client, backendPid });
+        owner = { client, backendPid, release: await currentWorkerRelease() };
+        await runCodexSession({ ...opts, resumeThreadId: threadId }, owner);
     } finally {
         await client.disconnect();
+        const released = owner?.replacement && lease && lease.exitCode === null && lease.signalCode === null ? once(lease, 'exit') : undefined;
         lease?.stdin?.end();
+        if (owner?.replacement && owner.release) {
+            const transfer = owner.replacement;
+            let result: Outcome = 'unverified';
+            try {
+                // The lease helper only exits after the original backend is gone.
+                if (released && !await Promise.race([released.then(() => true), delay(15_000, false, { ref: false })])) {
+                    // Keep the intent. The scheduled owner also checks both old PIDs before recovery.
+                    return;
+                }
+                result = await replaceReleasedWorker(owner.release, transfer.next, opts.nativeMobileDirectory, transfer.identity);
+                if (result === 'migrated' || result === 'restored') await unlink(join(opts.nativeMobileDirectory, 'rollover.json'));
+            } finally { transfer.finish(result); owner.control?.close(); }
+        } else { owner?.control?.close(); }
     }
 }
 
-async function runCodexSession(opts: RunCodexOptions, native?: { client: CodexAppServerClient; backendPid: number }): Promise<void> {
+async function runCodexSession(opts: RunCodexOptions, native?: NativeOwner): Promise<void> {
     if (opts.nativeConfig && (opts.noSandbox || opts.model !== undefined || opts.effort !== undefined || opts.permissionMode !== undefined)) {
         throw new Error('Native configuration cannot be combined with Happy model, effort, permission or sandbox overrides.');
     }
@@ -222,6 +247,10 @@ async function runCodexSession(opts: RunCodexOptions, native?: { client: CodexAp
     }
 
     let nativeChat: NativeChat | null = native && opts.resumeThreadId ? readNativeChat(opts.resumeThreadId, opts.credentials) : null;
+    if (process.env.HAPPY_HANDOFF_CHAT && (!nativeChat || nativeChat.sessionId !== process.env.HAPPY_HANDOFF_CHAT
+        || !accountName || nativeChat.account !== accountName || nativeChat.legacyPending || nativeChat.legacyHistoryPending)) {
+        throw new Error('Release handoff checkpoint identity changed.');
+    }
     if (native && !nativeChat && process.env.HAPPY_RECONNECT_SESSION_ID) throw new Error('This legacy chat must first be migrated with codex-account --mobile before automatic resume.');
     if (nativeChat && nativeChat.cwd !== process.cwd()) throw new Error('Native chat working directory changed; refusing to move the original chat.');
     let nativeHistorySnapshot: Awaited<ReturnType<typeof readNativeChatHistory>> | undefined;
@@ -277,6 +306,18 @@ async function runCodexSession(opts: RunCodexOptions, native?: { client: CodexAp
     let client!: CodexAppServerClient;
     let reasoningProcessor!: ReasoningProcessor;
     let abortInProgress: Promise<void> | null = null;
+    const releaseGate = new NativeReleaseGate();
+    let waitingForPhone = false;
+    let historyBusy = false;
+    let rpcInFlight = 0;
+    const guardSession = (value: ApiSessionClient) => {
+        if (!native?.release) return;
+        value.rpcHandlerManager.enterRequest = () => {
+            if (releaseGate.frozen || process.env.HAPPY_HANDOFF_CHAT) throw new Error('Session upgrade in progress; retry shortly.');
+            releaseGate.changed(); rpcInFlight++;
+            return () => { rpcInFlight--; releaseGate.changed(); };
+        };
+    }
     const { session: initialSession, reconnectionHandle } = setupOfflineReconnection({
         api,
         sessionTag,
@@ -284,6 +325,7 @@ async function runCodexSession(opts: RunCodexOptions, native?: { client: CodexAp
         state,
         response,
         onSessionSwap: (newSession) => {
+            guardSession(newSession);
             session = newSession;
             // Update permission handler with new session to avoid stale reference
             if (permissionHandler) {
@@ -291,6 +333,7 @@ async function runCodexSession(opts: RunCodexOptions, native?: { client: CodexAp
             }
         }
     });
+    guardSession(initialSession);
     session = initialSession;
     if (nativeChat) session.resumeNativeInput(nativeChat.inputSeq);
 
@@ -349,6 +392,8 @@ async function runCodexSession(opts: RunCodexOptions, native?: { client: CodexAp
     session.rpcHandlerManager.registerHandler('communication', value => questionForms.reply(value));
 
     session.onFileEvent((fileEvent) => {
+        releaseGate.changed();
+        if (releaseGate.frozen) return; // Replayed by the successor from the durable phone input receipt.
         const ev = fileEvent.content.data.ev;
         logger.debug('[Codex] File event received', {
             size: ev.size,
@@ -443,7 +488,10 @@ async function runCodexSession(opts: RunCodexOptions, native?: { client: CodexAp
             errorName: error instanceof Error ? error.name : typeof error,
         });
     });
-    session.onUserMessage(handleUserMessage);
+    session.onUserMessage(message => {
+        releaseGate.changed();
+        if (!releaseGate.frozen) handleUserMessage(message);
+    });
     let thinking = false;
     let currentTurnId: string | null = null;
     const sendTurnFailure = (message: Record<string, unknown>, failure: string) => {
@@ -841,6 +889,7 @@ async function runCodexSession(opts: RunCodexOptions, native?: { client: CodexAp
 
     // Event handler: same EventMsg types as the legacy MCP server — no changes needed
     client.setEventHandler((msg) => {
+        releaseGate.changed();
         if (msg.type === 'thread_name_updated') {
             const name = msg.name;
             if (opts.nativeMobileDirectory && msg.threadId === client.threadId && typeof name === 'string') {
@@ -1125,6 +1174,35 @@ async function runCodexSession(opts: RunCodexOptions, native?: { client: CodexAp
             client.nativeInputGate = send => rewind.input(send);
             nativeHistoryAbort.signal.throwIfAborted();
             first = false;
+            const identity = { threadId: client.threadId!, sessionId: chat.sessionId, account: accountName!, cwd: process.cwd() };
+            await activateStagedWorker(identity);
+            const release = native?.release;
+            if (native && release && accountName) {
+                const localIdle = () => !shouldExit && waitingForPhone && !thinking && !abortInProgress && !historyBusy && !rpcInFlight
+                    && !queuedQuestionReplies.size && !Object.keys(questionForms.snapshot().communications).length
+                    && !messageQueue.size() && !handleUserMessage.busy() && !forwardNativeUser.busy() && !chat.rewindIntent
+                    && client.nativeLocallyIdle() && session.nativeReleaseIdle?.() === true;
+                const directory = opts.nativeMobileDirectory;
+                const current = { ...identity, workerPid: process.pid, backendPid: backendPid!, release, handoff: 1 };
+                native.control = await serveRelease(directory, current, releaseGate, async next => {
+                    const backendIdle = () => client.nativeReleaseIdle(identity.threadId);
+                    if (!await releaseGate.reserve(localIdle, backendIdle, () => recordRelease(directory, current, next))) {
+                        if (!releaseGate.frozen && process.env.HAPPY_RELEASE_MAINTENANCE_ENTRY) {
+                            releaseGate.retryWhenIdle(async () => {
+                                if (!await releaseGate.inspectIdle(localIdle, backendIdle)) return false;
+                                await requestReleaseMaintenance(next);
+                                return true;
+                            });
+                        }
+                        return 'deferred';
+                    }
+                    return new Promise<Outcome>(finish => {
+                        native.replacement = { next, identity, finish };
+                        shouldExit = true;
+                        abortController.abort();
+                    });
+                });
+            }
             closeNativeFrontend = await publishNativeMobileReady(opts.nativeMobileDirectory, client.threadId!, backendPid!, async (method, params) => {
                 if (method !== 'thread/revert') return client.nativeFrontendRequest(method, params);
                 const result = await rewind.revert(params);
@@ -1145,10 +1223,11 @@ async function runCodexSession(opts: RunCodexOptions, native?: { client: CodexAp
                     logger.warn('[Codex native] Pending rewind could not synchronize on terminal resume', { threadId: client.threadId, error });
                     throw error;
                 }
-            });
+            }, release && accountName ? { gate: releaseGate, sessionId: chat.sessionId, release } : undefined);
             logger.debug('[Codex native] Live session ready', { threadId: client.threadId });
             if (opts.resumeThreadId) {
                 const threadId = opts.resumeThreadId;
+                historyBusy = true;
                 nativeHistoryTask = (async () => {
                     const startedAt = Date.now();
                     let publishedTurns = 0;
@@ -1184,7 +1263,7 @@ async function runCodexSession(opts: RunCodexOptions, native?: { client: CodexAp
                         logger.debug('[Codex native history] Incomplete', { threadId, publishedTurns, elapsedMs: Date.now() - startedAt, error });
                         session.sendSessionEvent({ type: 'message', message: 'Earlier messages did not finish syncing. Codex can still continue with its original context. Keep working; restart this mobile session later to retry history sync. Details are in the computer’s Happy log.' });
                     }
-                })();
+                })().finally(() => { historyBusy = false; releaseGate.changed(); });
             }
         }
 
@@ -1229,7 +1308,10 @@ async function runCodexSession(opts: RunCodexOptions, native?: { client: CodexAp
             if (!message) {
                 // Capture the current signal to distinguish idle-abort from queue close
                 const waitSignal = abortController.signal;
+                waitingForPhone = true;
+                releaseGate.changed();
                 const batch = await messageQueue.waitForMessagesAndGetAsString(waitSignal);
+                waitingForPhone = false;
                 if (!batch) {
                     // If wait was aborted (e.g., remote abort with no active inference), ignore and continue
                     if (waitSignal.aborted && !shouldExit) {
@@ -1425,6 +1507,7 @@ async function runCodexSession(opts: RunCodexOptions, native?: { client: CodexAp
 
     } finally {
         // Clean up resources when main loop exits
+        releaseGate.cancelRetry();
         shouldExit = true;
         nativeHistoryAbort.abort();
         clearInterval(keepAliveInterval);

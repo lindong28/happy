@@ -6,18 +6,15 @@ import { openSync, closeSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { configuration } from '@/configuration';
 import { spawnHappyCLI } from '@/utils/spawnHappyCLI';
-import { startNativeFrontendProxy, type NativeFrontendRequest } from './nativeMobileTransport';
+import { startNativeFrontendProxy, validateNativeMobileDirectory, type NativeFrontendRequest } from './nativeMobileTransport';
 import { registerNativeTerminal, syncNativeTerminal, type NativeTerminal } from './nativeTerminal';
 
-type NativeReady = { threadId: string; workerPid: number; backendPid: number; account: string; cwd: string };
+import type { NativeReleaseGate } from './nativeReleaseGate';
+import { movedTerminal, pinTerminal, type Ready as ReleaseReady } from './nativeRelease';
 
-export async function validateNativeMobileDirectory(directory: string): Promise<void> {
-    const info = await lstat(directory);
-    if (info.isSymbolicLink() || !info.isDirectory() || info.uid !== process.getuid?.() || (info.mode & 0o077)) {
-        throw new Error('Native mobile session directory must be private and owned by this user');
-    }
-    if (Buffer.byteLength(join(directory, 'f.sock')) > 100) throw new Error('HAPPY_HOME_DIR is too long for native mobile sockets');
-}
+type NativeReady = { threadId: string; workerPid: number; backendPid: number; account: string; cwd: string; handoff?: number };
+
+export { validateNativeMobileDirectory } from './nativeMobileTransport';
 
 export async function acquireNativeLease(threadId: string, backendPid: number, onLost: () => void): Promise<ChildProcess> {
     const entry = process.env.HAPPY_CODEX_ACCOUNT_ENTRY;
@@ -49,10 +46,10 @@ export async function acquireNativeLease(threadId: string, backendPid: number, o
     return child;
 }
 
-export async function publishNativeMobileReady(directory: string, threadId: string, backendPid: number, coordinatedRequest?: NativeFrontendRequest, onResume?: () => Promise<void>): Promise<() => Promise<void>> {
-    const closeProxy = await startNativeFrontendProxy(join(directory, 'f.sock'), join(directory, 'b.sock'), threadId, coordinatedRequest, onResume);
+export async function publishNativeMobileReady(directory: string, threadId: string, backendPid: number, coordinatedRequest?: NativeFrontendRequest, onResume?: () => Promise<void>, handoff?: { gate: NativeReleaseGate; sessionId: string; release: string }): Promise<() => Promise<void>> {
+    const closeProxy = await startNativeFrontendProxy(join(directory, 'f.sock'), join(directory, 'b.sock'), threadId, coordinatedRequest, onResume, handoff?.gate);
     const ready: NativeReady = { threadId, backendPid, workerPid: process.pid, account: process.env.HAPPY_CODEX_ACCOUNT_NAME ?? 'default', cwd: process.cwd() };
-    await writeFile(join(directory, 'ready.tmp'), JSON.stringify(ready), { mode: 0o600 });
+    await writeFile(join(directory, 'ready.tmp'), JSON.stringify(handoff ? { ...ready, sessionId: handoff.sessionId, release: handoff.release, handoff: 1 } : ready), { mode: 0o600 });
     await rename(join(directory, 'ready.tmp'), join(directory, 'ready.json'));
     return async () => { await unlink(join(directory, 'ready.json')).catch(() => undefined); await closeProxy(); };
 }
@@ -83,6 +80,16 @@ export async function launchNativeMobile(args: string[], resumeThreadId?: string
         directory = args[attachIndex + 1];
         if (!directory || !resumeThreadId || resolve(directory) !== directory || dirname(directory) !== root) throw new Error('Invalid existing mobile session directory.');
         ready = await readReady(directory);
+        if (!ready && process.env.HAPPY_CODEX_ACCOUNT_NAME) {
+            const { readCredentials } = await import('@/persistence');
+            const { readNativeChat } = await import('./nativeChat');
+            const credentials = await readCredentials();
+            const chat = credentials && readNativeChat(resumeThreadId, credentials);
+            if (chat && chat.account === process.env.HAPPY_CODEX_ACCOUNT_NAME && chat.cwd === process.cwd()) {
+                const replacement = await movedTerminal(root, directory, { ...chat, account: chat.account });
+                if (replacement) { ready = replacement.ready; directory = replacement.directory; }
+            }
+        }
         if (!ready || ready.threadId !== resumeThreadId || ready.account !== process.env.HAPPY_CODEX_ACCOUNT_NAME || ready.cwd !== process.cwd()) {
             throw new Error('The selected session backend changed. Run codex-account sessions before retrying.');
         }
@@ -118,7 +125,8 @@ export async function launchNativeMobile(args: string[], resumeThreadId?: string
             await new Promise(resolveWait => setTimeout(resolveWait, 100));
         }
     }
-    const selectedDirectory = resolve(directory!);
+    const pin = ready.handoff === 1 ? await pinTerminal(directory!, ready as ReleaseReady) : undefined;
+    const selectedDirectory = resolve(pin?.directory ?? directory!);
     let terminal: NativeTerminal | null = null;
     try {
         terminal = await registerNativeTerminal(selectedDirectory, ready.threadId);
@@ -137,6 +145,7 @@ export async function launchNativeMobile(args: string[], resumeThreadId?: string
         });
         process.exitCode = code;
     } finally {
+        pin?.close();
         await terminal?.close().catch(() => process.stderr.write('Happy terminal title attachment cleanup failed.\n'));
     }
 }

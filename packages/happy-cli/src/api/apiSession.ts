@@ -245,6 +245,12 @@ export class ApiSessionClient extends EventEmitter {
     private readonly inputSequences = new WeakMap<UserMessage, number>();
     private stableEnvelopeIds = false;
 
+    nativeReleaseIdle(): boolean {
+        return this.stableEnvelopeIds && !this.closed && this.socket.connected
+            && !this.receiveSync.busy && !this.sendSync.busy && !this.pendingOutbox.length
+            && !this.pendingMessages.length && !this.pendingFileEvents.length && !this.pendingDownloads.length;
+    }
+
     resumeNativeInput(afterSeq: number) {
         this.lastReceivedSeq = afterSeq;
         this.stableEnvelopeIds = true;

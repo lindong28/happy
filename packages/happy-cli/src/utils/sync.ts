@@ -11,6 +11,8 @@ export class InvalidateSync {
         this._command = command;
     }
 
+    get busy(): boolean { return this._invalidated; }
+
     invalidate() {
         if (this._stopped) {
             return;

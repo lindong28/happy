@@ -1,3 +1,4 @@
+import { NativeReleaseGate } from './nativeReleaseGate';
 import { readFileSync } from 'node:fs';
 import { EventEmitter } from 'node:events';
 import vm from 'node:vm';
@@ -85,6 +86,7 @@ function harness(preparation: boolean, slowCleanup: boolean, native = false) {
     const api = { getOrCreateMachine: async () => {}, getOrCreateSession: async () => ({ id: 's' }),
         deactivateSession: async () => { events.push('deactivate'); return true; } };
     const values: Record<string, any> = {
+        NativeReleaseGate, currentWorkerRelease: async () => undefined, activateStagedWorker: async () => {},
         ApiClient: { create: async () => api }, CodexAppServerClient: Client, CodexRequestRejected: Error,
         CodexPermissionHandler: Quiet, ReasoningProcessor: Quiet, DiffProcessor: Quiet, MessageBuffer: Quiet,
         QuestionForms: Forms, QuestionDeliveryError: Error, MessageQueue2: Queue,

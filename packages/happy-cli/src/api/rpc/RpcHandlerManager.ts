@@ -14,6 +14,7 @@ import {
 import { Socket } from 'socket.io-client';
 
 export class RpcHandlerManager {
+    enterRequest?: () => () => void;
     private handlers: RpcHandlerMap = new Map();
     private readonly scopePrefix: string;
     private readonly encryptionKey: Uint8Array;
@@ -79,7 +80,10 @@ export class RpcHandlerManager {
 
             // Call the handler
             this.logger('[RPC] Calling handler', { method: request.method });
-            const result = await handler(decryptedParams);
+            const leave = this.enterRequest?.();
+            let result;
+            try { result = await handler(decryptedParams); }
+            finally { leave?.(); }
             this.logger('[RPC] Handler returned', { method: request.method, hasResult: result !== undefined });
 
             // Encrypt and return the response

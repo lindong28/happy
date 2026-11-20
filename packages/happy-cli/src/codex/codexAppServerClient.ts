@@ -52,6 +52,7 @@ import type { SandboxConfig } from '@/persistence';
 import { initializeSandbox, wrapForMcpTransport } from '@/sandbox/manager';
 import packageJson from '../../package.json';
 import WebSocket from 'ws';
+import { idleBackendEvidence } from './nativeReleaseGate';
 import { connectNativeSocket } from './nativeMobileTransport';
 import type { NativeQuestion, NativeQuestionResponse } from './userQuestions';
 import type { NativeConfigReadout } from './nativeConfigMetadata';
@@ -290,6 +291,23 @@ export class CodexAppServerClient {
 
     get threadId(): string | null {
         return this._threadId;
+    }
+
+    nativeLocallyIdle(): boolean {
+        return !!this.nativeSocketPath && this.connected && this.socket?.readyState === WebSocket.OPEN
+            && !this._turnId && !this.pending.size && !this.pendingTurnCompletion && !this.pendingInterrupt
+            && !this.pendingServerRequests.size && !this.pendingApprovalCallIds.size;
+    }
+
+    async nativeReleaseIdle(threadId: string): Promise<boolean> {
+        if (this._threadId !== threadId || !this.nativeLocallyIdle()) return false;
+        const [{ thread }, goal, terminals, loaded] = await Promise.all([
+            this.readThread({ threadId, includeTurns: false }),
+            this.request('thread/goal/get', { threadId }, 4000),
+            this.request('thread/backgroundTerminals/list', { threadId, limit: 1 }, 4000),
+            this.request('thread/loaded/list', { limit: 2 }, 4000),
+        ]);
+        return idleBackendEvidence(threadId, thread, goal, terminals, loaded);
     }
 
     get turnId(): string | null {
