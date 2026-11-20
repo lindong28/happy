@@ -19,12 +19,16 @@ export function startDaemonControlServer({
   requestShutdown,
   onHappySessionWebhook,
   getConnectionStatus,
+  acceptingRegistrations,
+  prepareRetirement,
 }: {
   getChildren: () => TrackedSession[];
   stopSession: (sessionId: string) => boolean;
   spawnSession: (options: SpawnSessionOptions) => Promise<SpawnSessionResult>;
   requestShutdown: () => void;
   onHappySessionWebhook: (sessionId: string, metadata: Metadata, encryption?: SessionEncryptionData) => void;
+  acceptingRegistrations?: () => boolean;
+  prepareRetirement?: (token: string) => 'deferred' | 'accepted';
   getConnectionStatus?: () => { machineId: string; cliVersion: string; serverUrl: string; connected: boolean };
 }): Promise<{ port: number; stop: () => Promise<void> }> {
   return new Promise((resolve) => {
@@ -38,6 +42,10 @@ export function startDaemonControlServer({
     const typed = app.withTypeProvider<ZodTypeProvider>();
 
     typed.post('/status', async () => getConnectionStatus?.() ?? { machineId: null, connected: false });
+
+    typed.post('/prepare-release-retirement', {
+      schema: { body: z.object({ token: z.string().length(64) }) }
+    }, async request => ({ status: prepareRetirement?.(request.body.token) ?? 'deferred' }));
 
     // Session reports itself after creation
     typed.post('/session-started', {
@@ -60,6 +68,7 @@ export function startDaemonControlServer({
         }
       }
     }, async (request) => {
+      if (acceptingRegistrations?.() === false) throw Object.assign(new Error('Daemon is handing off'), { statusCode: 503 });
       const { sessionId, metadata, encryption } = request.body;
 
       logger.debug(`[CONTROL SERVER] Session started: ${sessionId}`);

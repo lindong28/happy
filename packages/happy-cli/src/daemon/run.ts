@@ -37,6 +37,8 @@ import {
 } from './sessionEnvironment';
 import { startHappyTerminalDaemon } from './happyTerminalBoot';
 import { appendDaemonSpawnModeArgs, shouldForwardDaemonPermissionMode } from './spawnModeArgs';
+import { recoverRegistrations } from './retirementRegistrations';
+import { ReleaseRetirement, managedRelease } from './releaseRetirement';
 import { hasPersistedProcessConflict, isPidAlive, machineBootTimeMs } from './sessionLiveness';
 
 /** Shell-escape a string for safe interpolation into tmux commands. */
@@ -65,6 +67,9 @@ export async function startDaemon(): Promise<void> {
   // The daemon may have been launched from a session process. Keep its normal
   // environment, but never let session lineage or reconnect state reach a
   // later, unrelated child session.
+  const retirement = new ReleaseRetirement(configuration.happyHomeDir, managedRelease(projectPath()));
+  const startWithoutTakeover = process.env.HAPPY_RELEASE_START_ONLY === '1';
+  delete process.env.HAPPY_RELEASE_START_ONLY;
   const ambientEnvironment = sanitizeSessionEnvironment(process.env);
 
   // We don't have cleanup function at the time of server construction
@@ -134,15 +139,14 @@ export async function startDaemon(): Promise<void> {
 
   // Check if already running
   // Check if running daemon version matches current CLI version
-  const runningDaemonVersionMatches = await isDaemonRunningCurrentlyInstalledHappyVersion();
-  if (!runningDaemonVersionMatches) {
+  if (!startWithoutTakeover && !(await isDaemonRunningCurrentlyInstalledHappyVersion())) {
     // TODO: This hand-rolled self-restart path is awkward to reason about and awkward to test.
     // We should probably migrate this daemon to native system service management
     // (launchd/systemd, similar to OpenClaw's model), so startup/start-at-login and upgrades
     // are owned by the OS instead of by the daemon trying to replace itself in-process.
     logger.debug('[DAEMON RUN] Daemon version mismatch detected, restarting daemon with current CLI version');
     await stopDaemon();
-  } else {
+  } else if (!startWithoutTakeover) {
     logger.debug('[DAEMON RUN] Daemon version matches, keeping existing daemon');
     console.log('Daemon already running with matching version');
     process.exit(0);
@@ -184,8 +188,7 @@ export async function startDaemon(): Promise<void> {
     // Retain session data after process exits so resume can still find it.
     // Pre-populate from disk so sessions survive daemon restarts.
     const sessionIdToFinishedSession = new Map<string, TrackedSession>();
-    const persisted = readPersistedSessions();
-    for (const [id, s] of Object.entries(persisted)) {
+    const rememberSession = (id: string, s: PersistedSession) => {
       sessionIdToFinishedSession.set(id, {
         startedBy: 'persisted',
         happySessionId: id,
@@ -199,7 +202,10 @@ export async function startDaemon(): Promise<void> {
         },
         pid: 0,
       });
-    }
+    };
+    recoverRegistrations();
+    const persisted = readPersistedSessions();
+    for (const [id, s] of Object.entries(persisted)) rememberSession(id, s);
     if (Object.keys(persisted).length > 0) {
       logger.debug(`[DAEMON RUN] Loaded ${Object.keys(persisted).length} persisted sessions from disk`);
     }
@@ -971,11 +977,16 @@ export async function startDaemon(): Promise<void> {
     const { port: controlPort, stop: stopControlServer } = await startDaemonControlServer({
       getChildren: getCurrentChildren,
       stopSession,
-      spawnSession,
+      spawnSession: retirement.run(spawnSession),
+      acceptingRegistrations: () => retirement.acceptingRegistrations,
+      prepareRetirement: token => retirement.prepare(token, !connectionReady() || registeringPids.size > 0 ||
+        stoppingPids.size > 0 || getCurrentChildren().some(child => isPidAlive(child.pid)), () => requestShutdown('happy-cli')),
       requestShutdown: () => requestShutdown('happy-cli'),
       onHappySessionWebhook,
       getConnectionStatus: () => ({
         machineId,
+        releaseRoot: retirement.release,
+        pid: process.pid,
         cliVersion: configuration.currentCliVersion,
         serverUrl: new URL(configuration.serverUrl).toString().replace(/\/+$/, ''),
         connected: connectionReady(),
@@ -1034,8 +1045,8 @@ export async function startDaemon(): Promise<void> {
 
     // Set RPC handlers
     apiMachine.setRPCHandlers({
-      spawnSession,
-      resumeSession,
+      spawnSession: retirement.run(spawnSession),
+      resumeSession: retirement.run(resumeSession),
       stopSession,
       requestShutdown: () => requestShutdown('happy-app')
     });
@@ -1060,6 +1071,7 @@ export async function startDaemon(): Promise<void> {
         logger.debug(`[DAEMON RUN] Health check started at ${new Date().toLocaleString()}`);
       }
 
+      recoverRegistrations(rememberSession);
       // Prune stale sessions
       for (const [pid, _] of pidToTrackedSession.entries()) {
         if (!isPidAlive(pid)) {

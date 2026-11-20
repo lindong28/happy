@@ -7,6 +7,7 @@ import { logger } from '@/ui/logger';
 import { clearDaemonState, readDaemonState } from '@/persistence';
 import { Metadata } from '@/api/types';
 import { configuration } from '@/configuration';
+import { queueRegistration } from './retirementRegistrations';
 
 async function daemonPost(path: string, body?: any, timeoutMs?: number): Promise<{ error?: string } | any> {
   const state = await readDaemonState();
@@ -76,6 +77,7 @@ export async function notifyDaemonSessionStarted(
   // app's resume-happy-session RPC fails with "not tracked by this daemon".
   const payload = { sessionId, metadata, encryption };
   const deadline = Date.now() + SESSION_STARTED_RETRY_TIMEOUT_MS;
+  let queued: ReturnType<typeof queueRegistration>;
   let result: { error?: string } | any;
 
   while (true) {
@@ -83,7 +85,25 @@ export async function notifyDaemonSessionStarted(
     if (!result?.error) {
       return result;
     }
+    if (encryption && !queued) {
+      queued = queueRegistration(sessionId, { ...encryption, metadata, savedAt: Date.now() });
+    }
     if (Date.now() >= deadline) {
+      if (queued) {
+        // The session can continue locally. While it lives, re-establish live
+        // control from this process; after exit the private recovery record
+        // still supplies its archive's encryption metadata.
+        const expected = queued;
+        const register = async () => {
+          const target = await getDaemonConnectionStatus();
+          if (target?.machineId === expected.machine && target.serverUrl === expected.server) {
+            const response = await daemonPost('/session-started', payload);
+            if (!response?.error) return;
+          }
+          setTimeout(register, 5000).unref();
+        };
+        setTimeout(register, 1000).unref();
+      }
       return result;
     }
     await new Promise(resolve => setTimeout(resolve, SESSION_STARTED_RETRY_INTERVAL_MS));

@@ -50,6 +50,12 @@ The daemon detects when `npm upgrade happy` occurs:
 5. New daemon calls `stopDaemon()` which tries HTTP `/stop`, falls back to SIGKILL
 6. New daemon takes over
 
+### Handing off an immutable personal release
+
+For a managed installation, `HAPPY_RELEASE_ROOT` identifies the release containing this CLI. The installer first verifies the current daemon, target machine and relay. A private request and the loopback `/prepare-release-retirement` endpoint let the incumbent admit a handoff only while connected, without any live tracked child or spawn/resume still in progress. After admission it records a receipt, fences new session work and shuts down gracefully. The installer starts the target using the exclusive daemon lock, verifies the actual release and connection, and can restart the source if the target exits before becoming ready. Older daemons retain their original lifecycle.
+
+A client whose first registration overlaps an accepted handoff saves its recovery metadata privately in the same profile and re-registers the live session with the same machine and relay. The replacement imports recovery data on startup and heartbeat. Only the live registration restores process control.
+
 ### Stopping the Daemon
 
 Command: `happy daemon stop`
