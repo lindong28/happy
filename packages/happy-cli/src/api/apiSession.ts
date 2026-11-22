@@ -1005,10 +1005,7 @@ export class ApiSessionClient extends EventEmitter {
                         const remaining = deadline - Date.now();
                         if (remaining <= 0) throw new Error('Phone history synchronization timed out; resume this session to reconcile it.');
                         const updated = handler(this.metadata!);
-                        const answer = await this.socket.timeout(Math.min(10_000, remaining)).emitWithAck('update-metadata', {
-                            sid: this.sessionId, expectedVersion: this.metadataVersion,
-                            metadata: encodeBase64(encrypt(this.encryptionKey, this.encryptionVariant, updated)),
-                        });
+                        const answer = await this.confirmMetadataWrite(updated, remaining);
                         if (answer.result === 'success' || answer.result === 'version-mismatch') {
                             if (answer.version >= this.metadataVersion) {
                                 this.metadata = decrypt(this.encryptionKey, this.encryptionVariant, decodeBase64(answer.metadata));
@@ -1022,6 +1019,30 @@ export class ApiSessionClient extends EventEmitter {
                 new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error('Phone history synchronization timed out; resume this session to reconcile it.')), 30_000); }),
             ]);
         } finally { if (timer) clearTimeout(timer); }
+    }
+
+    private async confirmMetadataWrite(updated: Metadata, remaining: number) {
+        const sid = this.sessionId;
+        const expectedVersion = this.metadataVersion;
+        const metadata = encodeBase64(encrypt(this.encryptionKey, this.encryptionVariant, updated));
+        const version = expectedVersion + 1;
+        const success = { result: 'success' as const, version, metadata };
+        let confirm!: (value: typeof success) => void;
+        const committed = new Promise<typeof success>(resolve => { confirm = resolve; });
+        // The relay broadcasts its committed CAS write before returning the ACK.
+        const onUpdate = ({ body }: Update) => {
+            if (body?.t === 'update-session' && body.id === sid &&
+                body.metadata?.version === version && body.metadata.value === metadata) {
+                confirm(success);
+            }
+        };
+        this.socket.on('update', onUpdate);
+        try {
+            const ack = this.socket.timeout(remaining).emitWithAck('update-metadata', { sid, expectedVersion, metadata });
+            return await Promise.race([ack, committed]);
+        } finally {
+            this.socket.off('update', onUpdate);
+        }
     }
 
     updateMetadata(handler: (metadata: Metadata) => Metadata) {

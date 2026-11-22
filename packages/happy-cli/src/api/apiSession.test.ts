@@ -237,6 +237,32 @@ describe('ApiSessionClient v3 messages API migration', () => {
         await client.close();
     });
 
+    it.each(['match', 'other-session', 'other-version', 'other-ciphertext'])('checks relay commit identity on delayed ACK: %s', async mode => {
+        const client = new ApiSessionClient('fake-token', session);
+        let rejectAck!: (reason: Error) => void;
+        mockSocket.emitWithAck.mockImplementationOnce((_event: string, write: { sid: string; expectedVersion: number; metadata: string }) => {
+            const body = {
+                t: 'update-session',
+                id: mode === 'other-session' ? 'another-chat' : write.sid,
+                metadata: {
+                    version: write.expectedVersion + (mode === 'other-version' ? 2 : 1),
+                    value: mode === 'other-ciphertext' ? encryptContent(session, session.metadata) : write.metadata,
+                },
+            };
+            const ack = new Promise((_resolve, reject) => { rejectAck = reject; });
+            for (const listener of socketHandlers.update) listener({ body });
+            return ack;
+        });
+        const result = client.updateMetadataConfirmed(current => ({ ...current, name: 'changed' }));
+        await vi.waitFor(() => expect(mockSocket.emitWithAck).toHaveBeenCalledTimes(1));
+        expect(mockSocket.timeout.mock.calls[0][0]).toBeGreaterThan(10_000);
+        rejectAck(new Error('ACK lost'));
+        if (mode === 'match') await expect(result).resolves.toBeUndefined();
+        else await expect(result).rejects.toThrow('ACK lost');
+        expect(mockSocket.off).toHaveBeenCalledWith('update', expect.any(Function));
+        await client.close();
+    });
+
     it.each(['hard-error', 'timeout'])('does not claim metadata synchronization on %s', async failure => {
         const client = new ApiSessionClient('fake-token', session);
         if (failure === 'timeout') mockSocket.emitWithAck.mockRejectedValueOnce(new Error('ack timeout'));

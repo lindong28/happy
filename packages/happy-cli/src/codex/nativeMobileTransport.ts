@@ -3,6 +3,7 @@ import { createServer } from 'node:http';
 import { join } from 'node:path';
 import { chmod, lstat, unlink } from 'node:fs/promises';
 import WebSocket, { WebSocketServer } from 'ws';
+import { NativeRewindRecoveryError } from './nativeRewind';
 import type { NativeReleaseGate } from './nativeReleaseGate';
 
 export async function validateNativeMobileDirectory(directory: string): Promise<void> {
@@ -83,7 +84,9 @@ export async function startNativeFrontendProxy(path: string, backend: string, th
                 if (coordinatedRequest) {
                     void coordinatedRequest(message.method, message.params ?? {}).then(
                         result => reply({ result }),
-                        error => reply({ error: { code: typeof error?.code === 'number' ? error.code : -32600, message: error instanceof Error ? error.message : 'Native request failed' } }),
+                        error => reply({ error: { code: typeof error?.code === 'number' ? error.code : -32600, message: error instanceof NativeRewindRecoveryError && message.method !== 'thread/revert'
+                            ? 'Phone history sync is still pending. Codex did not accept this terminal input. Check the Happy relay connection, then recall the prompt with Up and submit it once in this same chat. Queued phone inputs are preserved.'
+                            : error instanceof Error ? error.message : 'Native request failed' } }),
                     );
                     return;
                 }

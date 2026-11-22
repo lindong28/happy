@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import WebSocket, { WebSocketServer } from 'ws';
 import { expect, it, vi } from 'vitest';
+import { emptyNativeRewind, NativeRewindCoordinator, type NativeRewindState } from './nativeRewind';
 import { connectNativeSocket, nativeThreadRequestError, startNativeFrontendProxy } from './nativeMobileTransport';
 
 it('preserves native input and approval replies, rejecting both thread-change paths before forwarding', async () => {
@@ -56,6 +57,49 @@ it('preserves native input and approval replies, rejecting both thread-change pa
         frontend?.terminate();
         await close();
         for (const client of backend.clients) client.terminate();
+        backend.close();
+        await new Promise<void>(resolve => http.close(() => resolve()));
+        await rm(directory, { recursive: true, force: true });
+    }
+});
+
+it('guides a rejected terminal prompt through a same-chat retry without replaying rewind', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'hn-'));
+    const http = createServer();
+    const backend = new WebSocketServer({ server: http });
+    const backendPath = join(directory, 'b');
+    await new Promise<void>(resolve => http.listen(backendPath, resolve));
+    const rewind = emptyNativeRewind();
+    rewind.discardedTurnIds.push('discarded');
+    const state: NativeRewindState = { historyBoundary: 'kept', rewind, rewindIntent: {
+        beforeTurnId: 'discarded', retainedBoundary: 'kept', turnIds: ['discarded'], callIds: [], inputRanges: [],
+    } };
+    const publish = vi.fn(async () => {}).mockRejectedValueOnce(new Error('relay unavailable'));
+    const revert = vi.fn();
+    const coordinator = new NativeRewindCoordinator({
+        state, sessionId: 'chat', threadId: 'fixed', persist: vi.fn(), publish, list: vi.fn(), revert,
+        active: () => false, historySettled: async () => {},
+    });
+    const send = vi.fn(async () => ({ turn: { id: 'accepted' } }));
+    const path = join(directory, 'f');
+    const close = await startNativeFrontendProxy(path, backendPath, 'fixed', () => coordinator.input(send));
+    const frontend = await connectNativeSocket(path);
+    const submit = (id: number) => new Promise<{ error?: { message: string }; result?: { turn: { id: string } } }>(resolve => {
+        frontend.once('message', data => resolve(JSON.parse(data.toString())));
+        frontend.send(JSON.stringify({ id, method: 'turn/start', params: { threadId: 'fixed', input: [{ type: 'text', text: 'hello' }] } }));
+    });
+    try {
+        expect((await submit(1)).error?.message).toContain('did not accept this terminal input');
+        expect(send).not.toHaveBeenCalled();
+        expect(state.rewindIntent).toBeDefined();
+        expect((await submit(2)).result?.turn.id).toBe('accepted');
+        expect(send).toHaveBeenCalledTimes(1);
+        expect(state.rewindIntent).toBeUndefined();
+        expect(revert).not.toHaveBeenCalled();
+    } finally {
+        frontend.terminate();
+        await close();
+        for (const peer of backend.clients) peer.terminate();
         backend.close();
         await new Promise<void>(resolve => http.close(() => resolve()));
         await rm(directory, { recursive: true, force: true });
