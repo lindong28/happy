@@ -55,7 +55,7 @@ type Dependencies = {
     state: NativeRewindState;
     persist: () => void;
     publish: (projection: NativeRewindProjection) => Promise<void>;
-    list: (cursor: string | undefined, itemsView: 'full' | 'notLoaded') => Promise<{ data: ThreadTurn[]; nextCursor: string | null }>;
+    list: (cursor: string | undefined, itemsView: 'full' | 'notLoaded', limit: number, timeoutMs: number) => Promise<{ data: ThreadTurn[]; nextCursor: string | null }>;
     revert: (beforeTurnId: string) => Promise<unknown>;
     active: () => boolean;
     historySettled: () => Promise<unknown>;
@@ -86,22 +86,63 @@ export class NativeRewindCoordinator {
         try { return await send(); } finally { this.acceptingInputs--; }
     }
 
-    private async turnsUntil(target: string, itemsView: 'full' | 'notLoaded' = 'full'): Promise<ThreadTurn[]> {
+    private async turnsUntil(target: string, deadline: number): Promise<ThreadTurn[]> {
         const turns: ThreadTurn[] = [];
         const cursors = new Set<string>();
         let cursor: string | undefined;
-        const deadline = Date.now() + 60_000;
         do {
-            if (Date.now() >= deadline) throw new Error('Reading Codex rewind history timed out; history was not retried or rewritten.');
-            const page = await this.deps.list(cursor, itemsView);
+            const page = await this.deps.list(cursor, 'notLoaded', 100, this.readTimeout(deadline));
             turns.push(...page.data);
-            const index = target ? turns.findIndex(turn => turn.id === target) : -1;
-            if (index >= 0 && (index < turns.length - 1 || !page.nextCursor)) return turns;
+            const index = turns.findIndex(turn => turn.id === target);
+            if (index >= 0 && (index < turns.length - 1 || !page.nextCursor)) return turns.slice(0, index + 2);
             cursor = page.nextCursor ?? undefined;
             if (cursor && cursors.has(cursor)) throw new Error('Codex history returned a repeated cursor.');
             if (cursor) cursors.add(cursor);
         } while (cursor);
         return turns;
+    }
+
+    private readTimeout(deadline: number): number {
+        const remaining = deadline - Date.now();
+        if (remaining <= 0) throw new Error('Reading Codex rewind history timed out.');
+        return Math.min(30_000, remaining);
+    }
+
+    private async prepareIntent(beforeTurnId: string): Promise<NativeRewindIntent> {
+        const deadline = Date.now() + 60_000;
+        const turns = await this.turnsUntil(beforeTurnId, deadline);
+        const index = turns.findIndex(turn => turn.id === beforeTurnId);
+        if (index < 0) throw new Error('The selected Codex turn is no longer in this session.');
+        const turnIds = turns.slice(0, index + 1).map(turn => turn.id);
+        const intent: NativeRewindIntent = {
+            beforeTurnId, turnIds, retainedBoundary: turns[index + 1]?.id ?? null, callIds: [], inputRanges: [],
+        };
+        let offset = 0, pageSize = 8;
+        let cursor: string | undefined;
+        while (offset < turnIds.length) {
+            const limit = Math.min(pageSize, turnIds.length - offset);
+            let page;
+            try {
+                page = await this.deps.list(cursor, 'full', limit, this.readTimeout(deadline));
+            } catch (error) {
+                if (limit === 1 || Date.now() >= deadline) throw error;
+                // Retry only the read, at the same cursor, without the large payload.
+                pageSize = 1;
+                continue;
+            }
+            if (!page.data.length || page.data.length > limit) throw new Error('Invalid Codex history page.');
+            for (const turn of page.data) {
+                if (turn.id !== turnIds[offset++]) throw new Error('Codex history changed while preparing rewind.');
+                for (const item of turn.items) {
+                    intent.callIds.push(`${this.deps.threadId}:${item.id}`);
+                    const range = nativeInputRange((item as { clientId?: unknown }).clientId, this.deps.sessionId);
+                    if (range) intent.inputRanges.push(range);
+                }
+            }
+            cursor = page.nextCursor ?? undefined;
+            if (!cursor && offset < turnIds.length) throw new Error('Codex history ended before the selected turn.');
+        }
+        return intent;
     }
 
     private async commit(intent: NativeRewindIntent): Promise<void> {
@@ -137,7 +178,7 @@ export class NativeRewindCoordinator {
                 await this.publishPending();
                 return;
             }
-            const turns = await this.turnsUntil(intent.beforeTurnId, 'notLoaded');
+            const turns = await this.turnsUntil(intent.beforeTurnId, Date.now() + 60_000);
             if (turns.some(turn => turn.id === intent.beforeTurnId)) {
                 // Native mutation did not happen. Do not replay it on restart.
                 delete this.deps.state.rewindIntent;
@@ -163,24 +204,19 @@ export class NativeRewindCoordinator {
         const beforeTurnId = params.beforeTurnId;
         const work = async () => {
             await this.deps.historySettled();
-            const turns = await this.turnsUntil(beforeTurnId);
-            const index = turns.findIndex(turn => turn.id === beforeTurnId);
-            if (index < 0) throw new Error('The selected Codex turn is no longer in this session.');
-            const removed = turns.slice(0, index + 1);
-            const intent: NativeRewindIntent = {
-                beforeTurnId, turnIds: removed.map(turn => turn.id), retainedBoundary: turns[index + 1]?.id ?? null,
-                callIds: removed.flatMap(turn => turn.items.map(item => `${this.deps.threadId}:${item.id}`)),
-                inputRanges: removed.flatMap(turn => (turn.items ?? []).flatMap(item => {
-                    const range = nativeInputRange((item as { clientId?: unknown }).clientId, this.deps.sessionId);
-                    return range ? [range] : [];
-                })),
-            };
+            let intent: NativeRewindIntent;
+            try {
+                intent = await this.prepareIntent(beforeTurnId);
+            } catch (cause) {
+                const reason = cause instanceof Error ? cause.message : 'History unavailable';
+                throw new Error(`Could not prepare rewind to turn ${beforeTurnId}; rewind was not applied. ${reason} Reopen the history picker and select the same prompt to retry.`, { cause });
+            }
             this.deps.state.rewindIntent = intent;
             this.deps.persist();
             let result: unknown;
             try { result = await this.deps.revert(beforeTurnId); }
             catch (error) {
-                const remaining = await this.turnsUntil(beforeTurnId, 'notLoaded');
+                const remaining = await this.turnsUntil(beforeTurnId, Date.now() + 60_000);
                 if (remaining.some(turn => turn.id === beforeTurnId)) {
                     delete this.deps.state.rewindIntent;
                     this.deps.persist();

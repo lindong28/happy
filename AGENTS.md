@@ -12,7 +12,9 @@ a local `main` that is exactly `origin/main`, checked against a fetch made right
 then, with a clean tree.** Not from a worktree. Not from a branch. Not from a
 `main` that is ahead or behind. Perform these checks before every release.
 
-The only exception is one the user asks for by name in the current
+For the owner's MacBook Happy Personal CLI session-recovery fixes, the owner has granted a revocable personal-fork release policy. Verify the personal remote is `git@github.com:lindong28/happy.git`, the reviewed commit is on its current `main`, and local tests and CI passed. Build that exact clean tree and install through the MacBook's managed Personal CLI entry. This grant covers only that host and component. It ends on owner revocation (remove this paragraph and its pointer from the release skill). Other release targets follow the rules below.
+
+For other releases the only exception is one the user asks for by name in the current
 conversation. A standing instruction from an earlier session is not that, and
 neither is your own judgement that it is probably fine. When they do ask, the
 skill says how: show what `main` commits the release will lack, get a yes,

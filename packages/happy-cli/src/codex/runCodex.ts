@@ -1164,7 +1164,7 @@ async function runCodexSession(opts: RunCodexOptions, native?: NativeOwner): Pro
                 threadId: client.threadId!, sessionId: chat.sessionId, state: chat,
                 persist: () => writeNativeChat(chat),
                 publish: projection => session.updateMetadataConfirmed(current => ({ ...current, codexRewind: projection })),
-                list: (cursor, itemsView) => client.listThreadTurns({ threadId: client.threadId!, cursor, sortDirection: 'desc', itemsView, limit: 100 }),
+                list: (cursor, itemsView, limit, timeoutMs) => client.listThreadTurns({ threadId: client.threadId!, cursor, sortDirection: 'desc', itemsView, limit }, timeoutMs),
                 revert: beforeTurnId => client.nativeFrontendRequest('thread/revert', { threadId: client.threadId!, beforeTurnId }),
                 active: () => client.turnId !== null,
                 historySettled: () => nativeHistoryTask ?? Promise.resolve(),
@@ -1205,6 +1205,11 @@ async function runCodexSession(opts: RunCodexOptions, native?: NativeOwner): Pro
             }
             closeNativeFrontend = await publishNativeMobileReady(opts.nativeMobileDirectory, client.threadId!, backendPid!, async (method, params) => {
                 if (method !== 'thread/revert') return client.nativeFrontendRequest(method, params);
+                // Record the selected native identifiers before any history read can time out.
+                // The user's prompt and RPC payload stay out of the diagnostic.
+                if (typeof params.beforeTurnId === 'string' && /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i.test(params.beforeTurnId)) {
+                    logger.debug('[Codex native] Terminal selected rewind boundary', { threadId: client.threadId, beforeTurnId: params.beforeTurnId });
+                }
                 const result = await rewind.revert(params);
                 cancelQuestions();
                 reasoningProcessor.abort();

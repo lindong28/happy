@@ -14,9 +14,11 @@ function fixture() {
         threadId: 'thread', sessionId: 'chat', state,
         persist: () => { persisted.push(structuredClone(state)); },
         publish: vi.fn(async () => {}),
-        list: vi.fn(async (cursor?: string) => {
+        list: vi.fn(async (cursor: string | undefined, view: string, limit: number) => {
             const index = cursor ? Number(cursor) : 0;
-            return { data: turns.slice(index, index + 1), nextCursor: index + 1 < turns.length ? String(index + 1) : null };
+            const end = index + (limit ?? 1);
+            const data = turns.slice(index, end);
+            return { data: view === 'notLoaded' ? data.map(turn => ({ ...turn, items: [] })) : data, nextCursor: end < turns.length ? String(end) : null };
         }),
         revert: vi.fn(async (before: string) => {
             turns = turns.slice(turns.findIndex(turn => turn.id === before) + 1);
@@ -111,4 +113,27 @@ it('supports repeated rewind to the first turn and validates the input ID produc
     expect(nativeInputRange(nativePhoneInputId('chat'), 'chat')).toBeNull();
     expect(nativeInputRange(nativePhoneInputId('other', [1, 5]), 'chat')).toBeNull();
     expect(nativeInputRange('happy-native:chat:5:1:id', 'chat')).toBeNull();
+});
+
+it('reads full items only for discarded turns and retries a failed read at a smaller page size', async () => {
+    const f = fixture();
+    const read = f.deps.list.getMockImplementation()!;
+    f.deps.list.mockImplementation(async (cursor, view, limit) => {
+        if (view === 'full' && limit > 1) throw new Error('page timed out');
+        if (view === 'full' && Number(cursor) >= 2) throw new Error('read retained content');
+        return read(cursor, view, limit);
+    });
+    await f.coordinator.revert({ threadId: 'thread', beforeTurnId: 'b' });
+    expect(f.deps.list.mock.calls.filter(([, view]) => view === 'full').map(([, , limit]) => limit)).toEqual([2, 1, 1]);
+    expect(f.state.historyBoundary).toBe('a');
+    expect(f.state.rewind?.discardedCallIds).toEqual(['thread:input']);
+    expect(f.deps.revert).toHaveBeenCalledTimes(1);
+});
+
+it('identifies the selected turn and leaves history intact when the preparation read still fails', async () => {
+    const f = fixture();
+    f.deps.list.mockRejectedValue(new Error('read failed'));
+    await expect(f.coordinator.revert({ threadId: 'thread', beforeTurnId: 'b' })).rejects.toThrow(/b.*not applied/i);
+    expect(f.deps.revert).not.toHaveBeenCalled();
+    expect(f.persisted).toEqual([]);
 });

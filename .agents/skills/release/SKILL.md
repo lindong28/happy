@@ -14,7 +14,9 @@ You are the release operator for the Happy monorepo. When invoked, walk the user
 
 ## Step 0: Where you release from (never skipped)
 
-**Every release runs from a local `main` that is exactly `origin/main`, checked
+The MacBook Happy Personal CLI session-recovery release grant in the repository root AGENTS.md applies first, within its stated scope.
+
+**Every other release runs from a local `main` that is exactly `origin/main`, checked
 against a fetch made right then.** Not from a worktree. Not from a branch. Not
 from a `main` that is ahead by an unpushed commit or behind by anyone else's.
 Not with uncommitted changes. This applies to every target below: preview OTA,

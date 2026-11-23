@@ -1022,8 +1022,8 @@ export class CodexAppServerClient {
         sortDirection: 'asc' | 'desc';
         itemsView: 'notLoaded' | 'full';
         limit?: number;
-    }): Promise<{ data: ThreadTurn[]; nextCursor: string | null }> {
-        return await this.request('thread/turns/list', { limit: 1, ...opts }) as { data: ThreadTurn[]; nextCursor: string | null };
+    }, timeoutMs?: number): Promise<{ data: ThreadTurn[]; nextCursor: string | null }> {
+        return await this.request('thread/turns/list', { limit: 1, ...opts }, timeoutMs) as { data: ThreadTurn[]; nextCursor: string | null };
     }
 
     nativeInputGate?: (send: () => Promise<unknown>) => Promise<unknown>;
