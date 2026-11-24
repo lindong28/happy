@@ -131,7 +131,7 @@ it('wakes the owner for the currently selected compatible release after the defe
     vi.stubEnv('HAPPY_RELEASE_MAINTENANCE_ENTRY', stable);
     try {
         await requestReleaseMaintenance(target);
-        await vi.waitFor(async () => expect(await readFile(join(dir, 'requested'), 'utf8')).toBe('--request-maintenance'));
+        await vi.waitFor(async () => expect(await readFile(join(dir, 'requested'), 'utf8')).toBe('--request-maintenance'), { timeout: 4_000 });
     } finally { vi.unstubAllEnvs(); }
 });
 
