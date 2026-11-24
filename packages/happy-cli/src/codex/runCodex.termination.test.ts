@@ -1,3 +1,4 @@
+import { isDeepStrictEqual } from 'node:util';
 import { NativeReleaseGate } from './nativeReleaseGate';
 import { readFileSync } from 'node:fs';
 import { EventEmitter } from 'node:events';
@@ -22,7 +23,7 @@ function compile(name: string) {
 }
 
 // Execute the actual runner and client lifecycle, replacing only external I/O.
-function harness(preparation: boolean, slowCleanup: boolean, native = false) {
+function harness(preparation: boolean, slowCleanup: boolean, native = false, resumeCommitted = false) {
     const events: string[] = [];
     const prepared = deferred(), releasePrepare = deferred(), started = deferred();
     const cleaning = deferred(), releaseCleanup = deferred();
@@ -74,11 +75,19 @@ function harness(preparation: boolean, slowCleanup: boolean, native = false) {
         consumedModes = () => [];
     }
     let metadata: any = { path: '/mock', host: 'test' };
+    const rewind = { ...emptyNativeRewind(), discardedTurnIds: ['removed-turn'] };
     const envelopes: any[] = [];
     const session = {
         resumeNativeInput: noop, sessionId: 's', rpcHandlerManager: { registerHandler: noop }, onFileEvent: noop, onUserMessage: noop,
         updateAgentState: noop, updateMetadata: (update: any) => { metadata = update(metadata); }, keepAlive: noop, sendSessionEvent: noop,
-        updateMetadataConfirmed: async (update: any) => { metadata = update(metadata); },
+        updateMetadataConfirmed: async (update: any, matches?: (value: typeof metadata) => boolean) => {
+            if (resumeCommitted) {
+                if (matches?.({ ...metadata, codexRewind: emptyNativeRewind() })) throw new Error('Accepted a different rewind');
+                if (!matches?.({ ...metadata, codexRewind: { ...rewind } })) throw new Error('Phone history synchronization timed out');
+            }
+            metadata = update(metadata);
+        },
+        suppressNextArchiveSignal: noop,
         sendSessionProtocolMessage: (envelope: any) => envelopes.push(envelope),
         sendSessionDeath: () => events.push('death'), flush: async () => {},
         close: async () => { events.push('close'); }, getMetadata: () => ({}),
@@ -101,8 +110,9 @@ function harness(preparation: boolean, slowCleanup: boolean, native = false) {
         isCodexClearText: () => false, parseCodexGoalCommand: () => null, resolveCodexExecutionPolicy: () => ({}),
         acquireNativeLease: async () => ({ stdin: { end: noop } }),
         publishNativeMobileReady: async () => noop,
-        readNativeChat: () => null, createNativeChat: () => ({ inputSeq: 0, rewind: emptyNativeRewind() }), writeNativeChat: noop,
-        emptyNativeRewind, NativeRewindCoordinator, NativeRewindRecoveryError, mapCodexMcpMessageToSessionEnvelopes, createEnvelope,
+        decodeBase64: () => new Uint8Array(32),
+        readNativeChat: () => resumeCommitted ? { cwd: '/mock', sessionId: 's', encryptionKey: 'encoded', encryptionVariant: 'legacy', inputSeq: 0, rewind } : null, createNativeChat: () => ({ inputSeq: 0, rewind: emptyNativeRewind() }), writeNativeChat: noop,
+        isDeepStrictEqual, emptyNativeRewind, NativeRewindCoordinator, NativeRewindRecoveryError, mapCodexMcpMessageToSessionEnvelopes, createEnvelope,
         nativePhoneInputId: () => 'happy-native:s:input',
         resumeExistingThread: async ({ client }: any) => client.resumeThread(),
         prepareCodexImageInputItems: async () => {
@@ -121,11 +131,24 @@ function harness(preparation: boolean, slowCleanup: boolean, native = false) {
     values.registerSessionTermination = context.exports.registerSessionTermination;
     context.exports = {};
     vm.runInNewContext(compile('./runCodex.ts'), context);
-    const running = context.exports.runCodex({ credentials: {}, nativeConfig: preparation, ...(native ? { nativeMobileDirectory: '/mock' } : {}) });
+    const running = context.exports.runCodex({ credentials: {}, nativeConfig: preparation, ...(resumeCommitted ? { resumeThreadId: 'thread' } : {}), ...(native ? { nativeMobileDirectory: '/mock' } : {}) });
     return { events, envelopes, proc, prepared, releasePrepare, started, cleaning, releaseCleanup, running, client: () => client, metadata: () => metadata };
 }
 
 describe('Codex termination through the runner', () => {
+    it('reaches native input on same-chat resume with an already committed rewind', async () => {
+        const h = harness(true, false, true, true);
+        try {
+            await Promise.race([h.prepared.promise, h.running]);
+            expect(h.events).toContain('resume');
+            expect(h.metadata().codexRewind.discardedTurnIds).toEqual(['removed-turn']);
+        } finally {
+            h.proc.emit('SIGTERM');
+            h.releasePrepare.resolve();
+            await h.running;
+        }
+    });
+
     it('forwards live native turns and failures with the source history identity', async () => {
         const h = harness(true, false, true);
         await Promise.race([h.prepared.promise, h.running]);

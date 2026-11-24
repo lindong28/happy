@@ -47,6 +47,11 @@ jobs:
         pnpm --filter @slopus/happy-wire --fail-if-no-match build
         pnpm --filter happy --fail-if-no-match build
 
+    - name: Check native resume and relay confirmations
+      if: matrix.node-version == 22
+      working-directory: packages/happy-cli
+      run: pnpm exec vitest run --project unit src/api/apiSession.test.ts src/codex/runCodex.termination.test.ts
+
     # happy-server-self-host ships only a bundled runtime (no sources), and the
     # bundler is bun.
     - name: Install Bun

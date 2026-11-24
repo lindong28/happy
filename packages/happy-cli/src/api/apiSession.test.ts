@@ -1,3 +1,4 @@
+import { isDeepStrictEqual } from 'node:util';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ApiSessionClient } from './apiSession';
 import { decodeBase64, decrypt, decryptBlob, encodeBase64, encrypt } from './encryption';
@@ -260,6 +261,61 @@ describe('ApiSessionClient v3 messages API migration', () => {
         if (mode === 'match') await expect(result).resolves.toBeUndefined();
         else await expect(result).rejects.toThrow('ACK lost');
         expect(mockSocket.off).toHaveBeenCalledWith('update', expect.any(Function));
+        await client.close();
+    });
+
+    it('retries a lost compare-and-swap even when its stale snapshot matches', async () => {
+        session.metadataVersion = 4;
+        const client = new ApiSessionClient('fake-token', session);
+        const wanted = { ...session.metadata, name: 'wanted' };
+        mockSocket.emitWithAck
+            .mockResolvedValueOnce({ result: 'version-mismatch', version: 4, metadata: encryptContent(session, wanted) })
+            .mockResolvedValueOnce({ result: 'version-mismatch', version: 5, metadata: encryptContent(session, session.metadata) })
+            .mockImplementationOnce(async (_event: string, write: { metadata: string; expectedVersion: number }) => {
+                expect(write.expectedVersion).toBe(5);
+                return { result: 'success', version: 6, metadata: write.metadata };
+            });
+        await client.updateMetadataConfirmed(current => ({ ...current, name: 'wanted' }), current => current.name === 'wanted');
+        expect(mockSocket.emitWithAck).toHaveBeenCalledTimes(3);
+        await client.close();
+    });
+
+    it.each([0, 4])('resumes a committed rewind behind the reconnect lock (checkpoint version %i)', async checkpointVersion => {
+        vi.useFakeTimers();
+        session.metadataVersion = checkpointVersion;
+        const projection = { version: 1 as const, legacyThroughSeq: 0, legacyInputSeq: 0,
+            discardedTurnIds: ['old-turn'], discardedCallIds: ['old-call'], discardedInputRanges: [] };
+        const client = new ApiSessionClient('fake-token', session);
+        let finishReconnect!: (answer: unknown) => void;
+        mockSocket.emitWithAck.mockImplementationOnce(() => new Promise(resolve => { finishReconnect = resolve; }));
+        client.updateMetadata(current => ({ ...current, lifecycleState: 'running' }));
+        const result = client.updateMetadataConfirmed(current => ({ ...current, codexRewind: projection }),
+            current => isDeepStrictEqual(current.codexRewind, projection));
+        const observed = vi.fn();
+        void result.then(() => observed(true), () => observed(false));
+        const update = (id: string, version: number, metadata: unknown) => {
+            for (const handler of socketHandlers.update) handler({ body: {
+                t: 'update-session', id, metadata: { version, value: encryptContent(session, metadata) },
+            } });
+        };
+        const matching = { ...session.metadata, codexRewind: projection };
+        update('another-session', 8, matching);
+        update(session.id, 3, session.metadata);
+        update(session.id, 2, matching);
+        await vi.advanceTimersByTimeAsync(1);
+        expect(observed).not.toHaveBeenCalled();
+        if (checkpointVersion === 4) {
+            update(session.id, 4, matching);
+            await vi.advanceTimersByTimeAsync(1);
+            expect(observed).not.toHaveBeenCalled();
+        }
+        update(session.id, 5, matching);
+        await vi.advanceTimersByTimeAsync(30_000);
+        expect(observed).toHaveBeenCalledWith(true);
+        finishReconnect({ result: 'success', version: 1, metadata: encryptContent(session, session.metadata) });
+        await vi.advanceTimersByTimeAsync(1);
+        expect(client.getMetadata()).toEqual(matching);
+        expect(mockSocket.emitWithAck).toHaveBeenCalledTimes(1);
         await client.close();
     });
 

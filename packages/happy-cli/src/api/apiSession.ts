@@ -194,6 +194,8 @@ export class ApiSessionClient extends EventEmitter {
     readonly sessionId: string;
     private metadata: Metadata | null;
     private metadataVersion: number;
+    // A resumed client can be constructed with locally synthesized metadata.
+    private latestRelayVersion = -1;
     private agentState: AgentState | null;
     private agentStateVersion: number;
     private socket: Socket<ServerToClientEvents, ClientToServerEvents>;
@@ -366,9 +368,9 @@ export class ApiSessionClient extends EventEmitter {
                     this.routeIncomingMessage(body, messageSeq);
                     this.lastReceivedSeq = messageSeq;
                 } else if (data.body.t === 'update-session') {
-                    if (data.body.metadata && data.body.metadata.version > this.metadataVersion) {
-                        this.metadata = decrypt(this.encryptionKey, this.encryptionVariant, decodeBase64(data.body.metadata.value));
-                        this.metadataVersion = data.body.metadata.version;
+                    if (data.body.id !== this.sessionId) return;
+                    if (data.body.metadata && data.body.metadata.version > this.metadataVersion &&
+                        this.acceptRelayMetadata(data.body.metadata.version, data.body.metadata.value)) {
                         // Check if session was archived from web/mobile
                         const meta = this.metadata as any;
                         if (meta?.lifecycleState === 'archiveRequested' || meta?.lifecycleState === 'archived') {
@@ -994,36 +996,67 @@ export class ApiSessionClient extends EventEmitter {
         this.skipInitialMessages = true;
     }
 
+    private acceptRelayMetadata(version: number, ciphertext: string) {
+        if (version < this.metadataVersion || version < this.latestRelayVersion ||
+            (version === this.metadataVersion && version === this.latestRelayVersion)) return false;
+        this.metadata = decrypt(this.encryptionKey, this.encryptionVariant, decodeBase64(ciphertext));
+        this.metadataVersion = version;
+        this.latestRelayVersion = version;
+        this.emit('relayMetadata');
+        return true;
+    }
+
+    private acceptMetadataMismatch(expectedVersion: number, version: number, ciphertext: string) {
+        if (version === expectedVersion) {
+            // A concurrent writer won after the relay's SELECT. The returned
+            // pre-write snapshot is stale, even if its projection matches ours.
+            this.latestRelayVersion = Math.max(this.latestRelayVersion, expectedVersion + 1);
+        } else {
+            this.acceptRelayMetadata(version, ciphertext);
+        }
+    }
+
     /** Await a durable relay acknowledgement, including a bounded metadata-lock wait. */
-    async updateMetadataConfirmed(handler: (metadata: Metadata) => Metadata): Promise<void> {
+    async updateMetadataConfirmed(handler: (metadata: Metadata) => Metadata, alreadyCommitted?: (metadata: Metadata) => boolean): Promise<void> {
+        const matches = () => this.metadataVersion === this.latestRelayVersion && this.metadata !== null && alreadyCommitted?.(this.metadata);
+        if (matches()) return;
+        let finish!: () => void;
+        const committed = new Promise<void>(resolve => { finish = resolve; });
+        const onMetadata = () => { if (matches()) finish(); };
+        if (alreadyCommitted) this.on('relayMetadata', onMetadata);
+        let settled = false;
         const deadline = Date.now() + 30_000;
         let timer: ReturnType<typeof setTimeout> | undefined;
         try {
             await Promise.race([
+                committed,
                 this.metadataLock.inLock(async () => {
                     for (let attempt = 0; attempt < 3; attempt++) {
+                        if (settled || matches()) return;
                         const remaining = deadline - Date.now();
                         if (remaining <= 0) throw new Error('Phone history synchronization timed out; resume this session to reconcile it.');
                         const updated = handler(this.metadata!);
-                        const answer = await this.confirmMetadataWrite(updated, remaining);
+                        const expectedVersion = this.metadataVersion;
+                        const answer = await this.confirmMetadataWrite(updated, expectedVersion, remaining);
                         if (answer.result === 'success' || answer.result === 'version-mismatch') {
-                            if (answer.version >= this.metadataVersion) {
-                                this.metadata = decrypt(this.encryptionKey, this.encryptionVariant, decodeBase64(answer.metadata));
-                                this.metadataVersion = answer.version;
-                            }
-                            if (answer.result === 'success') return;
+                            if (answer.result === 'success') this.acceptRelayMetadata(answer.version, answer.metadata);
+                            else this.acceptMetadataMismatch(expectedVersion, answer.version, answer.metadata);
+                            if (matches() || (answer.result === 'success' && !alreadyCommitted)) return;
                         } else throw new Error('Phone history synchronization was rejected; resume this session to reconcile it.');
                     }
                     throw new Error('Phone metadata kept changing; retry after synchronization settles.');
                 }),
                 new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error('Phone history synchronization timed out; resume this session to reconcile it.')), 30_000); }),
             ]);
-        } finally { if (timer) clearTimeout(timer); }
+        } finally {
+            settled = true;
+            if (timer) clearTimeout(timer);
+            if (alreadyCommitted) this.off('relayMetadata', onMetadata);
+        }
     }
 
-    private async confirmMetadataWrite(updated: Metadata, remaining: number) {
+    private async confirmMetadataWrite(updated: Metadata, expectedVersion: number, remaining: number) {
         const sid = this.sessionId;
-        const expectedVersion = this.metadataVersion;
         const metadata = encodeBase64(encrypt(this.encryptionKey, this.encryptionVariant, updated));
         const version = expectedVersion + 1;
         const success = { result: 'success' as const, version, metadata };
@@ -1049,15 +1082,12 @@ export class ApiSessionClient extends EventEmitter {
         this.metadataLock.inLock(async () => {
             await backoff(async () => {
                 let updated = handler(this.metadata!); // Weird state if metadata is null - should never happen but here we are
-                const answer = await this.socket.emitWithAck('update-metadata', { sid: this.sessionId, expectedVersion: this.metadataVersion, metadata: encodeBase64(encrypt(this.encryptionKey, this.encryptionVariant, updated)) });
+                const expectedVersion = this.metadataVersion;
+                const answer = await this.socket.emitWithAck('update-metadata', { sid: this.sessionId, expectedVersion, metadata: encodeBase64(encrypt(this.encryptionKey, this.encryptionVariant, updated)) });
                 if (answer.result === 'success') {
-                    this.metadata = decrypt(this.encryptionKey, this.encryptionVariant, decodeBase64(answer.metadata));
-                    this.metadataVersion = answer.version;
+                    this.acceptRelayMetadata(answer.version, answer.metadata);
                 } else if (answer.result === 'version-mismatch') {
-                    if (answer.version > this.metadataVersion) {
-                        this.metadataVersion = answer.version;
-                        this.metadata = decrypt(this.encryptionKey, this.encryptionVariant, decodeBase64(answer.metadata));
-                    }
+                    this.acceptMetadataMismatch(expectedVersion, answer.version, answer.metadata);
                     throw new Error('Metadata version mismatch');
                 } else if (answer.result === 'error') {
                     // Hard error - ignore

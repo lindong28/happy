@@ -21,6 +21,7 @@ import { MessageQueue2, type PendingAttachment } from '@/utils/MessageQueue2';
 import { projectPath } from '@/projectPath';
 import { join } from 'node:path';
 import { once } from 'node:events';
+import { isDeepStrictEqual } from 'node:util';
 import { setTimeout as delay } from 'node:timers/promises';
 import { unlink } from 'node:fs/promises';
 import type { Server } from 'node:http';
@@ -59,7 +60,7 @@ import { createSerialAsyncHandler } from './utils/serialAsyncHandler';
 import { buildCodexThreadBackfillEnvelopes, createCodexBackfillContext } from './utils/threadImageBackfill';
 import { syncNativeHistory } from './nativeHistory';
 import { createNativeChat, isNativePhoneInput, nativePhoneInputId, readNativeChat, readNativeChatHistory, unseenNativeHistory, writeNativeChat, type NativeChat } from './nativeChat';
-import { emptyNativeRewind, NativeRewindCoordinator, NativeRewindRecoveryError } from './nativeRewind';
+import { emptyNativeRewind, NativeRewindCoordinator, NativeRewindRecoveryError, type NativeRewindProjection } from './nativeRewind';
 import {
     buildCodexTurnPrompt,
     hashCodexEnhancedMode,
@@ -1160,17 +1161,21 @@ async function runCodexSession(opts: RunCodexOptions, native?: NativeOwner): Pro
                 chat.historySeq = snapshot.seq;
                 writeNativeChat(chat);
             }
+            const publishRewind = (projection: NativeRewindProjection) => session.updateMetadataConfirmed(
+                current => ({ ...current, codexRewind: projection }),
+                current => isDeepStrictEqual(current.codexRewind, projection),
+            );
             const rewind = new NativeRewindCoordinator({
                 threadId: client.threadId!, sessionId: chat.sessionId, state: chat,
                 persist: () => writeNativeChat(chat),
-                publish: projection => session.updateMetadataConfirmed(current => ({ ...current, codexRewind: projection })),
+                publish: publishRewind,
                 list: (cursor, itemsView, limit, timeoutMs) => client.listThreadTurns({ threadId: client.threadId!, cursor, sortDirection: 'desc', itemsView, limit }, timeoutMs),
                 revert: beforeTurnId => client.nativeFrontendRequest('thread/revert', { threadId: client.threadId!, beforeTurnId }),
                 active: () => client.turnId !== null,
                 historySettled: () => nativeHistoryTask ?? Promise.resolve(),
             });
             await rewind.recover();
-            await session.updateMetadataConfirmed(current => ({ ...current, codexRewind: chat.rewind }));
+            await publishRewind(chat.rewind);
             client.nativeInputGate = send => rewind.input(send);
             nativeHistoryAbort.signal.throwIfAborted();
             first = false;
